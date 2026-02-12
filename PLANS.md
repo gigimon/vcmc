@@ -79,6 +79,11 @@ MVP-функции (итерация 1):
 [] Подготовить README: хоткеи, ограничения POSIX-first, known issues.
 [] Сформировать backlog для итерации 2 (архивы, предпросмотр, multi-select, tabs).
 
+## Step 10: Rename Dialogs и табличный UI
+[x] Добавить окно изменения имени для copy/move перед постановкой job.
+[x] Показать список файлов в колонках `Name | Size | Modified`.
+[x] Сохранить цветовую дифференциацию file/dir/symlink и корректный highlight selection.
+
 # Definition of Done (итерация 1)
 [] Двухпанельная навигация стабильна и без UI-фризов.
 [] Основные операции (copy/move/delete/mkdir) выполняются через jobs и отображают статус.

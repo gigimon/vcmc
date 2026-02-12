@@ -8,7 +8,7 @@ use crate::fs::FsAdapter;
 use crate::jobs::WorkerPool;
 use crate::model::{
     AppState, Command, Event, FsEntry, FsEntryType, Job, JobKind, JobRequest, JobStatus, JobUpdate,
-    PanelId, TerminalSize,
+    PanelId, RenamePrompt, TerminalSize,
 };
 
 pub struct App {
@@ -18,6 +18,7 @@ pub struct App {
     workers: WorkerPool,
     next_job_id: u64,
     pending_confirmation: Option<PendingConfirmation>,
+    pending_rename: Option<PendingRename>,
     input_mode: Option<InputMode>,
 }
 
@@ -27,6 +28,13 @@ enum PendingConfirmation {
         name: String,
         is_directory: bool,
     },
+}
+
+struct PendingRename {
+    kind: JobKind,
+    source_path: PathBuf,
+    source_name: String,
+    destination_dir: PathBuf,
 }
 
 enum InputMode {
@@ -45,6 +53,7 @@ impl App {
             workers,
             next_job_id: 1,
             pending_confirmation: None,
+            pending_rename: None,
             input_mode: None,
         };
 
@@ -64,11 +73,15 @@ impl App {
     pub fn on_event(&mut self, event: Event) -> bool {
         match event {
             Event::Input(key) => {
-                if let Some(redraw) = self.handle_alert_input() {
+                if let Some(redraw) = self.handle_alert_input(&key) {
                     return redraw;
                 }
 
                 if let Some(redraw) = self.handle_confirmation_input(&key) {
+                    return redraw;
+                }
+
+                if let Some(redraw) = self.handle_rename_input(&key) {
                     return redraw;
                 }
 
@@ -103,6 +116,8 @@ impl App {
                     PanelId::Right => PanelId::Left,
                 };
                 self.input_mode = None;
+                self.pending_rename = None;
+                self.state.rename_prompt = None;
                 Ok(true)
             }
             Command::MoveSelectionUp => {
@@ -281,15 +296,13 @@ impl App {
     }
 
     fn queue_copy(&mut self) -> Result<bool> {
-        let selected = self.selected_action_target_entry()?.path;
-        let target = self.inactive_panel_cwd();
-        self.enqueue_job(JobKind::Copy, selected, Some(target), "copy queued")
+        let entry = self.selected_action_target_entry()?;
+        self.open_rename_prompt(JobKind::Copy, &entry)
     }
 
     fn queue_move(&mut self) -> Result<bool> {
-        let selected = self.selected_action_target_entry()?.path;
-        let target = self.inactive_panel_cwd();
-        self.enqueue_job(JobKind::Move, selected, Some(target), "move queued")
+        let entry = self.selected_action_target_entry()?;
+        self.open_rename_prompt(JobKind::Move, &entry)
     }
 
     fn queue_delete(&mut self) -> Result<bool> {
@@ -316,6 +329,29 @@ impl App {
     fn queue_mkdir(&mut self) -> Result<bool> {
         let target = self.find_available_directory_name(self.active_panel().cwd.clone(), "new_dir");
         self.enqueue_job(JobKind::Mkdir, target, None, "mkdir queued")
+    }
+
+    fn open_rename_prompt(&mut self, kind: JobKind, entry: &FsEntry) -> Result<bool> {
+        self.input_mode = None;
+        let destination_dir = self.inactive_panel_cwd();
+        self.pending_rename = Some(PendingRename {
+            kind,
+            source_path: entry.path.clone(),
+            source_name: entry.name.clone(),
+            destination_dir,
+        });
+
+        let verb = match kind {
+            JobKind::Copy => "Copy as",
+            JobKind::Move => "Move as",
+            _ => "Rename as",
+        };
+        self.state.rename_prompt = Some(RenamePrompt {
+            title: format!("{verb} (Enter apply, Esc cancel)"),
+            value: entry.name.clone(),
+        });
+        self.state.status_line = format!("{verb}: {}", entry.name);
+        Ok(true)
     }
 
     fn enqueue_job(
@@ -441,10 +477,90 @@ impl App {
         }
     }
 
-    fn handle_alert_input(&mut self) -> Option<bool> {
+    fn handle_alert_input(&mut self, _key: &KeyEvent) -> Option<bool> {
         self.state.alert_prompt.as_ref()?;
         self.state.alert_prompt = None;
         Some(true)
+    }
+
+    fn handle_rename_input(&mut self, key: &KeyEvent) -> Option<bool> {
+        self.pending_rename.as_ref()?;
+        self.state.rename_prompt.as_ref()?;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.pending_rename = None;
+                self.state.rename_prompt = None;
+                self.push_log("copy/move canceled");
+                Some(true)
+            }
+            KeyCode::Enter => {
+                let pending = self.pending_rename.take();
+                let requested_name = self
+                    .state
+                    .rename_prompt
+                    .as_ref()
+                    .map(|prompt| prompt.value.trim().to_string())
+                    .unwrap_or_default();
+                self.state.rename_prompt = None;
+
+                let Some(pending) = pending else {
+                    return Some(true);
+                };
+
+                if requested_name.is_empty() {
+                    self.show_alert("name cannot be empty");
+                    return Some(true);
+                }
+                if requested_name.contains('/') {
+                    self.show_alert("name cannot contain '/'");
+                    return Some(true);
+                }
+
+                let destination = pending.destination_dir.join(&requested_name);
+                let verb = if pending.kind == JobKind::Copy {
+                    "copy queued"
+                } else {
+                    "move queued"
+                };
+                let message = if requested_name == pending.source_name {
+                    format!("{verb}: {}", pending.source_name)
+                } else {
+                    format!("{verb}: {} -> {}", pending.source_name, requested_name)
+                };
+
+                let result = self.enqueue_job(
+                    pending.kind,
+                    pending.source_path,
+                    Some(destination),
+                    message,
+                );
+                Some(match result {
+                    Ok(redraw) => redraw,
+                    Err(err) => {
+                        self.show_alert(err.to_string());
+                        true
+                    }
+                })
+            }
+            KeyCode::Backspace => {
+                if let Some(prompt) = self.state.rename_prompt.as_mut() {
+                    prompt.value.pop();
+                }
+                Some(true)
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if c != '/' && c != '\0' {
+                    if let Some(prompt) = self.state.rename_prompt.as_mut() {
+                        prompt.value.push(c);
+                    }
+                }
+                Some(true)
+            }
+            _ => Some(false),
+        }
     }
 
     fn handle_search_input(&mut self, key: &KeyEvent) -> Option<bool> {

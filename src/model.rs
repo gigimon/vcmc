@@ -144,6 +144,7 @@ pub struct AppState {
     pub activity_log: Vec<String>,
     pub confirm_prompt: Option<String>,
     pub alert_prompt: Option<String>,
+    pub rename_prompt: Option<RenamePrompt>,
     pub jobs: Vec<Job>,
     pub terminal_size: TerminalSize,
 }
@@ -158,6 +159,7 @@ impl AppState {
             activity_log: Vec::new(),
             confirm_prompt: None,
             alert_prompt: None,
+            rename_prompt: None,
             jobs: Vec::new(),
             terminal_size: TerminalSize {
                 width: 0,
@@ -165,6 +167,12 @@ impl AppState {
             },
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct RenamePrompt {
+    pub title: String,
+    pub value: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

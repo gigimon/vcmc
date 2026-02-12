@@ -1,3 +1,4 @@
+use chrono::{DateTime, Local};
 use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -44,6 +45,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_log(frame, chunks[3], state);
     render_help(frame, chunks[4]);
 
+    if let Some(prompt) = &state.rename_prompt {
+        render_rename_dialog(frame, prompt.title.as_str(), prompt.value.as_str());
+    }
     if let Some(prompt) = &state.confirm_prompt {
         render_confirm_dialog(frame, prompt);
     }
@@ -127,51 +131,74 @@ fn build_entry_lines(
     panel_active: bool,
     capacity: usize,
 ) -> Vec<Line<'static>> {
-    if capacity == 0 {
+    if capacity <= 1 {
         return Vec::new();
     }
 
+    let header = Line::styled(
+        format!(
+            "{:<name_width$} {:>9} {:>16}",
+            "Name",
+            "Size",
+            "Modified",
+            name_width = name_column_width(capacity, panel)
+        ),
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    );
+
+    let rows_capacity = capacity.saturating_sub(1);
     let selected = panel
         .selected_index
         .min(panel.entries.len().saturating_sub(1));
-    let start = visible_window_start(selected, panel.entries.len(), capacity);
-    let end = (start + capacity).min(panel.entries.len());
+    let start = visible_window_start(selected, panel.entries.len(), rows_capacity);
+    let end = (start + rows_capacity).min(panel.entries.len());
+    let name_width = name_column_width(rows_capacity, panel);
 
-    panel.entries[start..end]
-        .iter()
-        .enumerate()
-        .map(|(offset, entry)| {
-            let idx = start + offset;
-            let selected_style = if idx == selected {
-                if panel_active {
-                    Style::default()
-                        .fg(Color::Black)
-                        .bg(Color::Cyan)
-                        .add_modifier(Modifier::BOLD)
-                } else {
-                    Style::default().bg(Color::DarkGray)
-                }
-            } else {
+    let mut lines = Vec::with_capacity(rows_capacity + 1);
+    lines.push(header);
+
+    for (offset, entry) in panel.entries[start..end].iter().enumerate() {
+        let idx = start + offset;
+        let selected_style = if idx == selected {
+            if panel_active {
                 Style::default()
-            };
+                    .fg(Color::Black)
+                    .bg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().bg(Color::DarkGray)
+            }
+        } else {
+            Style::default()
+        };
 
-            let marker = match entry.entry_type {
-                FsEntryType::Directory => "D",
-                FsEntryType::File => "F",
-                FsEntryType::Symlink => "L",
-                FsEntryType::Other => "?",
-            };
-            let name_style = selected_style.patch(type_style(entry));
-            let nav = if entry.is_virtual { ">" } else { " " };
-            let hidden = if entry.is_hidden { "." } else { " " };
-            let line = format!(
-                "{marker} {:>7} {nav}{hidden} {}",
-                human_size(entry.size_bytes),
-                entry.name
-            );
-            Line::styled(line, name_style)
-        })
-        .collect()
+        let mut name = entry_name(entry);
+        if name.chars().count() > name_width {
+            name = truncate_name(&name, name_width);
+        }
+
+        let size_text = if entry.is_virtual {
+            "-".to_string()
+        } else {
+            human_size(entry.size_bytes)
+        };
+        let mtime_text = format_modified_at(entry);
+
+        let mut spans = Vec::new();
+        spans.push(Span::styled(
+            format!("{:<name_width$}", name, name_width = name_width),
+            selected_style.patch(type_style(entry)),
+        ));
+        spans.push(Span::styled(" ", selected_style));
+        spans.push(Span::styled(format!("{:>9}", size_text), selected_style));
+        spans.push(Span::styled(" ", selected_style));
+        spans.push(Span::styled(format!("{:>16}", mtime_text), selected_style));
+        lines.push(Line::from(spans));
+    }
+
+    lines
 }
 
 fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -192,9 +219,20 @@ fn render_log(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_help(frame: &mut Frame, area: Rect) {
     let help = Paragraph::new(
-        "Tab switch  Arrows move  Enter open  Backspace up  / search  Home/~ home  F2 sort  F5/F6/F7/F8 ops  y/n confirm  any-key close alert  q quit",
+        "Tab switch  Arrows move  Enter open  Backspace up  / search  Home/~ home  F2 sort  F5/F6 rename-op  F7 mkdir  F8 delete  y/n confirm  any-key close alert  q quit",
     );
     frame.render_widget(help, area);
+}
+
+fn render_rename_dialog(frame: &mut Frame, title: &str, value: &str) {
+    let area = centered_rect(75, 6, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Cyan));
+    let content = Paragraph::new(format!("{value}\n\nEnter apply, Esc cancel")).block(block);
+    frame.render_widget(content, area);
 }
 
 fn render_confirm_dialog(frame: &mut Frame, prompt: &str) {
@@ -235,6 +273,41 @@ fn type_style(entry: &FsEntry) -> Style {
         FsEntryType::Symlink => Style::default().fg(Color::Magenta),
         _ => Style::default(),
     }
+}
+
+fn name_column_width(_rows_capacity: usize, panel: &PanelState) -> usize {
+    let max_width = panel
+        .entries
+        .iter()
+        .map(entry_name)
+        .map(|name| name.chars().count())
+        .max()
+        .unwrap_or(4);
+    max_width.clamp(10, 40)
+}
+
+fn entry_name(entry: &FsEntry) -> String {
+    if entry.is_virtual {
+        return "..".to_string();
+    }
+
+    match entry.entry_type {
+        FsEntryType::Directory => format!("{}/", entry.name),
+        FsEntryType::Symlink => format!("{}@", entry.name),
+        _ => entry.name.clone(),
+    }
+}
+
+fn truncate_name(name: &str, width: usize) -> String {
+    if width <= 1 {
+        return "…".to_string();
+    }
+    let mut truncated = String::new();
+    for c in name.chars().take(width - 1) {
+        truncated.push(c);
+    }
+    truncated.push('…');
+    truncated
 }
 
 fn visible_window_start(selected: usize, total: usize, capacity: usize) -> usize {
@@ -297,6 +370,18 @@ fn human_size(bytes: u64) -> String {
     } else {
         format!("{size:.1}{}", UNITS[unit_idx])
     }
+}
+
+fn format_modified_at(entry: &FsEntry) -> String {
+    if entry.is_virtual {
+        return "-".to_string();
+    }
+    let Some(ts) = entry.modified_at else {
+        return "-".to_string();
+    };
+
+    let dt: DateTime<Local> = DateTime::<Local>::from(ts);
+    dt.format("%Y-%m-%d %H:%M").to_string()
 }
 
 fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
