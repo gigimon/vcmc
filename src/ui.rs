@@ -80,9 +80,10 @@ fn render_panel(frame: &mut Frame, area: Rect, name: &str, panel: &PanelState, a
     };
 
     let title = format!(
-        "{name} [{}] {}",
+        "{name} [{}] {}{}",
         sort_label(panel.sort_mode),
-        panel.cwd.display()
+        panel.cwd.display(),
+        search_suffix(panel),
     );
 
     let block = Block::default()
@@ -188,7 +189,7 @@ fn render_log(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_help(frame: &mut Frame, area: Rect) {
     let help = Paragraph::new(
-        "Tab switch  Arrows move  Enter open  Backspace up  Home/~ home  F2 sort  F5/F6/F7/F8 ops  y/n confirm  q quit",
+        "Tab switch  Arrows move  Enter open  Backspace up  / search  Home/~ home  F2 sort  F5/F6/F7/F8 ops  y/n confirm  q quit",
     );
     frame.render_widget(help, area);
 }
@@ -238,6 +239,14 @@ fn sort_label(mode: SortMode) -> &'static str {
         SortMode::Name => "name",
         SortMode::Size => "size",
         SortMode::ModifiedAt => "mtime",
+    }
+}
+
+fn search_suffix(panel: &PanelState) -> String {
+    if panel.search_query.is_empty() {
+        String::new()
+    } else {
+        format!("  /{}", panel.search_query)
     }
 }
 

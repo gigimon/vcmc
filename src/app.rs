@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
-use crossterm::event::{KeyCode, KeyEvent};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::fs::FsAdapter;
 use crate::jobs::WorkerPool;
@@ -18,10 +18,15 @@ pub struct App {
     workers: WorkerPool,
     next_job_id: u64,
     pending_confirmation: Option<PendingConfirmation>,
+    input_mode: Option<InputMode>,
 }
 
 enum PendingConfirmation {
     Delete { path: PathBuf, name: String },
+}
+
+enum InputMode {
+    Search(PanelId),
 }
 
 impl App {
@@ -36,6 +41,7 @@ impl App {
             workers,
             next_job_id: 1,
             pending_confirmation: None,
+            input_mode: None,
         };
 
         let _ = app.reload_panel(PanelId::Left, true)?;
@@ -55,6 +61,10 @@ impl App {
         match event {
             Event::Input(key) => {
                 if let Some(redraw) = self.handle_confirmation_input(&key) {
+                    return redraw;
+                }
+
+                if let Some(redraw) = self.handle_search_input(&key) {
                     return redraw;
                 }
 
@@ -84,6 +94,7 @@ impl App {
                     PanelId::Left => PanelId::Right,
                     PanelId::Right => PanelId::Left,
                 };
+                self.input_mode = None;
                 Ok(true)
             }
             Command::MoveSelectionUp => {
@@ -105,6 +116,7 @@ impl App {
             Command::Delete => self.queue_delete(),
             Command::Mkdir => self.queue_mkdir(),
             Command::ToggleSort => self.toggle_sort(),
+            Command::StartSearch => self.start_search(),
         };
 
         match command_result {
@@ -183,9 +195,8 @@ impl App {
         match self.fs.list_dir(&cwd, sort_mode, show_hidden) {
             Ok(entries) => {
                 let panel = self.panel_mut(panel_id);
-                panel.entries = entries;
+                panel.set_entries(entries);
                 panel.error_message = None;
-                panel.normalize_selection();
                 if update_status {
                     self.state.status_line = format!("Loaded {}", cwd.display());
                 }
@@ -193,6 +204,7 @@ impl App {
             }
             Err(err) => {
                 let panel = self.panel_mut(panel_id);
+                panel.all_entries.clear();
                 panel.entries.clear();
                 panel.selected_index = 0;
                 panel.error_message = Some(err.to_string());
@@ -241,6 +253,18 @@ impl App {
         let next_sort = self.active_panel().sort_mode.next();
         self.active_panel_mut().sort_mode = next_sort;
         self.reload_panel(self.state.active_panel, true)
+    }
+
+    fn start_search(&mut self) -> Result<bool> {
+        let panel_id = self.state.active_panel;
+        self.input_mode = Some(InputMode::Search(panel_id));
+        let query = self.panel_mut(panel_id).search_query.clone();
+        if query.is_empty() {
+            self.state.status_line = "search: type to filter, Enter apply, Esc clear".to_string();
+        } else {
+            self.state.status_line = format!("search: {query}");
+        }
+        Ok(true)
     }
 
     fn queue_copy(&mut self) -> Result<bool> {
@@ -370,6 +394,55 @@ impl App {
         }
     }
 
+    fn handle_search_input(&mut self, key: &KeyEvent) -> Option<bool> {
+        let panel_id = match self.input_mode {
+            Some(InputMode::Search(panel_id)) => panel_id,
+            None => return None,
+        };
+
+        match key.code {
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                let panel = self.panel_mut(panel_id);
+                panel.search_query.push(c);
+                panel.apply_search_filter();
+                self.state.status_line = format!("search: {}", panel.search_query);
+                Some(true)
+            }
+            KeyCode::Backspace => {
+                let panel = self.panel_mut(panel_id);
+                panel.search_query.pop();
+                panel.apply_search_filter();
+                if panel.search_query.is_empty() {
+                    self.state.status_line =
+                        "search: type to filter, Enter apply, Esc clear".to_string();
+                } else {
+                    self.state.status_line = format!("search: {}", panel.search_query);
+                }
+                Some(true)
+            }
+            KeyCode::Esc => {
+                self.input_mode = None;
+                let panel = self.panel_mut(panel_id);
+                panel.clear_search();
+                self.state.status_line = "search cleared".to_string();
+                Some(true)
+            }
+            KeyCode::Enter => {
+                self.input_mode = None;
+                let query = self.panel_mut(panel_id).search_query.clone();
+                if query.is_empty() {
+                    self.state.status_line = "search off".to_string();
+                } else {
+                    self.state.status_line = format!("search applied: {query}");
+                }
+                Some(true)
+            }
+            _ => Some(false),
+        }
+    }
+
     fn push_log(&mut self, message: impl Into<String>) {
         const MAX_ACTIVITY_LOG: usize = 16;
 
@@ -396,6 +469,9 @@ fn map_key_to_command(key: &KeyEvent) -> Option<Command> {
         KeyCode::F(8) => Some(Command::Delete),
         KeyCode::F(2) => Some(Command::ToggleSort),
         KeyCode::Char('r') => Some(Command::Refresh),
+        KeyCode::Char('/') if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            Some(Command::StartSearch)
+        }
         KeyCode::Char('~') => Some(Command::GoHome),
         KeyCode::Home => Some(Command::GoHome),
         _ => None,

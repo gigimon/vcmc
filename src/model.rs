@@ -50,10 +50,12 @@ pub struct FsEntry {
 #[derive(Debug, Clone)]
 pub struct PanelState {
     pub cwd: PathBuf,
+    pub all_entries: Vec<FsEntry>,
     pub entries: Vec<FsEntry>,
     pub selected_index: usize,
     pub sort_mode: SortMode,
     pub show_hidden: bool,
+    pub search_query: String,
     pub error_message: Option<String>,
 }
 
@@ -61,10 +63,12 @@ impl PanelState {
     pub fn new(cwd: PathBuf) -> Self {
         Self {
             cwd,
+            all_entries: Vec::new(),
             entries: Vec::new(),
             selected_index: 0,
             sort_mode: SortMode::Name,
             show_hidden: false,
+            search_query: String::new(),
             error_message: None,
         }
     }
@@ -95,6 +99,33 @@ impl PanelState {
 
     pub fn selected_entry(&self) -> Option<&FsEntry> {
         self.entries.get(self.selected_index)
+    }
+
+    pub fn set_entries(&mut self, entries: Vec<FsEntry>) {
+        self.all_entries = entries;
+        self.apply_search_filter();
+    }
+
+    pub fn clear_search(&mut self) {
+        self.search_query.clear();
+        self.apply_search_filter();
+    }
+
+    pub fn apply_search_filter(&mut self) {
+        if self.search_query.trim().is_empty() {
+            self.entries = self.all_entries.clone();
+            self.normalize_selection();
+            return;
+        }
+
+        let needle = self.search_query.to_lowercase();
+        self.entries = self
+            .all_entries
+            .iter()
+            .filter(|entry| entry.is_virtual || entry.name.to_lowercase().contains(needle.as_str()))
+            .cloned()
+            .collect();
+        self.normalize_selection();
     }
 }
 
@@ -149,6 +180,7 @@ pub enum Command {
     Delete,
     Mkdir,
     ToggleSort,
+    StartSearch,
 }
 
 #[derive(Debug, Clone)]
