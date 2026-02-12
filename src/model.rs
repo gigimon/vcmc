@@ -53,6 +53,7 @@ pub struct PanelState {
     pub selected_index: usize,
     pub sort_mode: SortMode,
     pub show_hidden: bool,
+    pub error_message: Option<String>,
 }
 
 impl PanelState {
@@ -63,6 +64,7 @@ impl PanelState {
             selected_index: 0,
             sort_mode: SortMode::Name,
             show_hidden: false,
+            error_message: None,
         }
     }
 

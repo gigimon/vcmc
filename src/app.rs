@@ -32,8 +32,8 @@ impl App {
             next_job_id: 1,
         };
 
-        app.reload_panel(PanelId::Left, true)?;
-        app.reload_panel(PanelId::Right, false)?;
+        let _ = app.reload_panel(PanelId::Left, true)?;
+        let _ = app.reload_panel(PanelId::Right, false)?;
         Ok(app)
     }
 
@@ -45,41 +45,44 @@ impl App {
         self.running
     }
 
-    pub fn on_event(&mut self, event: Event) {
+    pub fn on_event(&mut self, event: Event) -> bool {
         match event {
             Event::Input(key) => {
                 if let Some(cmd) = map_key_to_command(key) {
-                    self.apply_command(cmd);
+                    self.apply_command(cmd)
+                } else {
+                    false
                 }
             }
-            Event::Tick => {}
+            Event::Tick => false,
             Event::Resize { width, height } => {
                 self.state.terminal_size = TerminalSize { width, height };
+                true
             }
             Event::Job(update) => self.handle_job_update(update),
         }
     }
 
-    fn apply_command(&mut self, command: Command) {
-        let command_result: Result<()> = match command {
+    fn apply_command(&mut self, command: Command) -> bool {
+        let command_result: Result<bool> = match command {
             Command::Quit => {
                 self.running = false;
-                Ok(())
+                Ok(false)
             }
             Command::SwitchPanel => {
                 self.state.active_panel = match self.state.active_panel {
                     PanelId::Left => PanelId::Right,
                     PanelId::Right => PanelId::Left,
                 };
-                Ok(())
+                Ok(true)
             }
             Command::MoveSelectionUp => {
                 self.active_panel_mut().move_selection_up();
-                Ok(())
+                Ok(true)
             }
             Command::MoveSelectionDown => {
                 self.active_panel_mut().move_selection_down();
-                Ok(())
+                Ok(true)
             }
             Command::Refresh => self
                 .reload_panel(PanelId::Left, true)
@@ -94,12 +97,16 @@ impl App {
             Command::ToggleSort => self.toggle_sort(),
         };
 
-        if let Err(err) = command_result {
-            self.state.status_line = err.to_string();
+        match command_result {
+            Ok(should_redraw) => should_redraw,
+            Err(err) => {
+                self.state.status_line = err.to_string();
+                true
+            }
         }
     }
 
-    fn handle_job_update(&mut self, update: JobUpdate) {
+    fn handle_job_update(&mut self, update: JobUpdate) -> bool {
         let needs_reload = update.status == JobStatus::Done;
         let next_status_line = match update.status {
             JobStatus::Failed => update
@@ -129,6 +136,8 @@ impl App {
             let _ = self.reload_panel(PanelId::Left, false);
             let _ = self.reload_panel(PanelId::Right, false);
         }
+
+        true
     }
 
     fn active_panel_mut(&mut self) -> &mut crate::model::PanelState {
@@ -152,68 +161,75 @@ impl App {
         }
     }
 
-    fn reload_panel(&mut self, panel_id: PanelId, update_status: bool) -> Result<()> {
+    fn reload_panel(&mut self, panel_id: PanelId, update_status: bool) -> Result<bool> {
         let (cwd, sort_mode, show_hidden) = {
             let panel = self.panel_mut(panel_id);
             (panel.cwd.clone(), panel.sort_mode, panel.show_hidden)
         };
-        let entries = self.fs.list_dir(&cwd, sort_mode, show_hidden)?;
-
-        let panel = self.panel_mut(panel_id);
-        panel.entries = entries;
-        panel.normalize_selection();
-        if update_status {
-            self.state.status_line = format!("Loaded {}", cwd.display());
+        match self.fs.list_dir(&cwd, sort_mode, show_hidden) {
+            Ok(entries) => {
+                let panel = self.panel_mut(panel_id);
+                panel.entries = entries;
+                panel.error_message = None;
+                panel.normalize_selection();
+                if update_status {
+                    self.state.status_line = format!("Loaded {}", cwd.display());
+                }
+                Ok(true)
+            }
+            Err(err) => {
+                let panel = self.panel_mut(panel_id);
+                panel.entries.clear();
+                panel.selected_index = 0;
+                panel.error_message = Some(err.to_string());
+                Err(err.into())
+            }
         }
-        Ok(())
     }
 
-    fn open_selected_directory(&mut self) -> Result<()> {
+    fn open_selected_directory(&mut self) -> Result<bool> {
         let selected = self.active_panel().selected_entry().cloned();
         let Some(entry) = selected else {
-            return Ok(());
+            return Ok(false);
         };
 
         if entry.entry_type != FsEntryType::Directory {
             self.state.status_line = format!("{} is not a directory", entry.name);
-            return Ok(());
+            return Ok(true);
         }
 
         let next_path = self.fs.normalize_existing_path("open", &entry.path)?;
         self.active_panel_mut().cwd = next_path;
-        self.reload_panel(self.state.active_panel, true)?;
-        Ok(())
+        self.reload_panel(self.state.active_panel, true)
     }
 
-    fn go_to_parent(&mut self) -> Result<()> {
+    fn go_to_parent(&mut self) -> Result<bool> {
         let current = self.active_panel().cwd.clone();
         let Some(parent) = current.parent() else {
-            return Ok(());
+            return Ok(false);
         };
 
         let normalized = self.fs.normalize_existing_path("parent", parent)?;
         self.active_panel_mut().cwd = normalized;
-        self.reload_panel(self.state.active_panel, true)?;
-        Ok(())
+        self.reload_panel(self.state.active_panel, true)
     }
 
-    fn go_to_home(&mut self) -> Result<()> {
+    fn go_to_home(&mut self) -> Result<bool> {
         let home = std::env::var_os("HOME")
             .map(PathBuf::from)
             .ok_or_else(|| anyhow::anyhow!("HOME environment variable is not set"))?;
         let normalized = self.fs.normalize_existing_path("home", &home)?;
         self.active_panel_mut().cwd = normalized;
-        self.reload_panel(self.state.active_panel, true)?;
-        Ok(())
+        self.reload_panel(self.state.active_panel, true)
     }
 
-    fn toggle_sort(&mut self) -> Result<()> {
+    fn toggle_sort(&mut self) -> Result<bool> {
         let next_sort = self.active_panel().sort_mode.next();
         self.active_panel_mut().sort_mode = next_sort;
         self.reload_panel(self.state.active_panel, true)
     }
 
-    fn queue_copy(&mut self) -> Result<()> {
+    fn queue_copy(&mut self) -> Result<bool> {
         let selected = self
             .active_panel()
             .selected_entry()
@@ -223,7 +239,7 @@ impl App {
         self.enqueue_job(JobKind::Copy, selected, Some(target), "copy queued")
     }
 
-    fn queue_move(&mut self) -> Result<()> {
+    fn queue_move(&mut self) -> Result<bool> {
         let selected = self
             .active_panel()
             .selected_entry()
@@ -233,7 +249,7 @@ impl App {
         self.enqueue_job(JobKind::Move, selected, Some(target), "move queued")
     }
 
-    fn queue_delete(&mut self) -> Result<()> {
+    fn queue_delete(&mut self) -> Result<bool> {
         let selected = self
             .active_panel()
             .selected_entry()
@@ -242,7 +258,7 @@ impl App {
         self.enqueue_job(JobKind::Delete, selected, None, "delete queued")
     }
 
-    fn queue_mkdir(&mut self) -> Result<()> {
+    fn queue_mkdir(&mut self) -> Result<bool> {
         let target = self.find_available_directory_name(self.active_panel().cwd.clone(), "new_dir");
         self.enqueue_job(JobKind::Mkdir, target, None, "mkdir queued")
     }
@@ -253,7 +269,7 @@ impl App {
         source: PathBuf,
         destination: Option<PathBuf>,
         queued_message: &str,
-    ) -> Result<()> {
+    ) -> Result<bool> {
         let request = JobRequest {
             id: self.next_job_id,
             kind,
@@ -272,7 +288,7 @@ impl App {
         });
         self.state.status_line = queued_message.to_string();
         self.workers.submit(request)?;
-        Ok(())
+        Ok(true)
     }
 
     fn inactive_panel_cwd(&self) -> PathBuf {

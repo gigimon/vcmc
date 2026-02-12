@@ -25,10 +25,13 @@ fn main() -> Result<()> {
     let (mut terminal, mut guard) = terminal::init_terminal()?;
     let runtime_handle = runtime::spawn_event_pump(event_tx, Duration::from_millis(150));
 
+    terminal.draw(|frame| ui::render(frame, app.state()))?;
+
     while app.is_running() {
-        terminal.draw(|frame| ui::render(frame, app.state()))?;
         let event = event_rx.recv()?;
-        app.on_event(event);
+        if app.on_event(event) {
+            terminal.draw(|frame| ui::render(frame, app.state()))?;
+        }
     }
 
     guard.restore()?;
