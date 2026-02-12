@@ -1,6 +1,7 @@
 mod app;
 mod errors;
 mod fs;
+mod jobs;
 mod model;
 mod runtime;
 mod terminal;
@@ -18,11 +19,10 @@ fn main() -> Result<()> {
     init_tracing();
     terminal::install_panic_hook();
 
-    let (mut terminal, mut guard) = terminal::init_terminal()?;
     let cwd = env::current_dir()?;
-    let mut app = app::App::bootstrap(cwd)?;
-
     let (event_tx, event_rx) = unbounded();
+    let mut app = app::App::bootstrap(cwd, event_tx.clone())?;
+    let (mut terminal, mut guard) = terminal::init_terminal()?;
     let runtime_handle = runtime::spawn_event_pump(event_tx, Duration::from_millis(150));
 
     while app.is_running() {

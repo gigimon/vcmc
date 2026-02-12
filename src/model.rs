@@ -179,6 +179,14 @@ pub struct Job {
 }
 
 #[derive(Debug, Clone)]
+pub struct JobRequest {
+    pub id: u64,
+    pub kind: JobKind,
+    pub source: PathBuf,
+    pub destination: Option<PathBuf>,
+}
+
+#[derive(Debug, Clone)]
 pub struct JobUpdate {
     pub id: u64,
     pub kind: JobKind,
