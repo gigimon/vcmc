@@ -4,6 +4,7 @@ mod fs;
 mod jobs;
 mod model;
 mod runtime;
+mod smoke;
 mod terminal;
 mod ui;
 
@@ -18,6 +19,12 @@ use tracing_subscriber::EnvFilter;
 fn main() -> Result<()> {
     init_tracing();
     terminal::install_panic_hook();
+
+    if is_smoke_mode() {
+        let report = smoke::run_smoke()?;
+        println!("{}", report.to_text());
+        return Ok(());
+    }
 
     let cwd = env::current_dir()?;
     let (event_tx, event_rx) = unbounded();
@@ -43,6 +50,10 @@ fn main() -> Result<()> {
 
     info!("vcmc shutdown complete");
     Ok(())
+}
+
+fn is_smoke_mode() -> bool {
+    env::args().any(|arg| arg == "--smoke")
 }
 
 fn init_tracing() {
