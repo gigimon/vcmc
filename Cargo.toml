@@ -1,0 +1,14 @@
+[package]
+name = "vcmc"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0"
+crossbeam-channel = "0.5"
+crossterm = "0.28"
+ratatui = "0.29"
+thiserror = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+walkdir = "2.5"
