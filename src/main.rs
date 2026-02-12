@@ -1,5 +1,6 @@
 mod app;
 mod errors;
+mod fs;
 mod model;
 mod runtime;
 mod terminal;
@@ -19,7 +20,7 @@ fn main() -> Result<()> {
 
     let (mut terminal, mut guard) = terminal::init_terminal()?;
     let cwd = env::current_dir()?;
-    let mut app = app::App::bootstrap(cwd);
+    let mut app = app::App::bootstrap(cwd)?;
 
     let (event_tx, event_rx) = unbounded();
     let runtime_handle = runtime::spawn_event_pump(event_tx, Duration::from_millis(150));
@@ -27,7 +28,7 @@ fn main() -> Result<()> {
     while app.is_running() {
         terminal.draw(|frame| ui::render(frame, app.state()))?;
         let event = event_rx.recv()?;
-        app.on_event(event)?;
+        app.on_event(event);
     }
 
     guard.restore()?;

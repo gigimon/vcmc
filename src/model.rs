@@ -18,6 +18,16 @@ pub enum SortMode {
     ModifiedAt,
 }
 
+impl SortMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Name => Self::Size,
+            Self::Size => Self::ModifiedAt,
+            Self::ModifiedAt => Self::Name,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FsEntryType {
     Directory,
@@ -68,6 +78,20 @@ impl PanelState {
 
         let last = self.entries.len().saturating_sub(1);
         self.selected_index = (self.selected_index + 1).min(last);
+    }
+
+    pub fn normalize_selection(&mut self) {
+        if self.entries.is_empty() {
+            self.selected_index = 0;
+            return;
+        }
+
+        let last = self.entries.len().saturating_sub(1);
+        self.selected_index = self.selected_index.min(last);
+    }
+
+    pub fn selected_entry(&self) -> Option<&FsEntry> {
+        self.entries.get(self.selected_index)
     }
 }
 
