@@ -152,9 +152,10 @@ fn build_entry_lines(
                 FsEntryType::Other => "?",
             };
             let name_style = selected_style.patch(type_style(entry));
-            let hidden_prefix = if entry.is_hidden { "." } else { " " };
+            let nav = if entry.is_virtual { ">" } else { " " };
+            let hidden = if entry.is_hidden { "." } else { " " };
             let line = format!(
-                "{marker} {:>7} {hidden_prefix} {}",
+                "{marker} {:>7} {nav}{hidden} {}",
                 human_size(entry.size_bytes),
                 entry.name
             );
@@ -171,12 +172,18 @@ fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_help(frame: &mut Frame, area: Rect) {
     let help = Paragraph::new(
-        "Tab switch  Arrows move  Enter open  Backspace up  F2 sort  F5/F6/F7/F8 ops  q quit",
+        "Tab switch  Arrows move  Enter open  Backspace up  Home/~ home  F2 sort  F5/F6/F7/F8 ops  q quit",
     );
     frame.render_widget(help, area);
 }
 
 fn type_style(entry: &FsEntry) -> Style {
+    if entry.is_virtual {
+        return Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+    }
+
     match entry.entry_type {
         FsEntryType::Directory => Style::default().fg(Color::Blue),
         FsEntryType::Symlink => Style::default().fg(Color::Magenta),

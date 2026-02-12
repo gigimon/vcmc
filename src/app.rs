@@ -230,31 +230,19 @@ impl App {
     }
 
     fn queue_copy(&mut self) -> Result<bool> {
-        let selected = self
-            .active_panel()
-            .selected_entry()
-            .map(|entry| entry.path.clone())
-            .ok_or_else(|| anyhow::anyhow!("no selected entry"))?;
+        let selected = self.selected_action_target_path()?;
         let target = self.inactive_panel_cwd();
         self.enqueue_job(JobKind::Copy, selected, Some(target), "copy queued")
     }
 
     fn queue_move(&mut self) -> Result<bool> {
-        let selected = self
-            .active_panel()
-            .selected_entry()
-            .map(|entry| entry.path.clone())
-            .ok_or_else(|| anyhow::anyhow!("no selected entry"))?;
+        let selected = self.selected_action_target_path()?;
         let target = self.inactive_panel_cwd();
         self.enqueue_job(JobKind::Move, selected, Some(target), "move queued")
     }
 
     fn queue_delete(&mut self) -> Result<bool> {
-        let selected = self
-            .active_panel()
-            .selected_entry()
-            .map(|entry| entry.path.clone())
-            .ok_or_else(|| anyhow::anyhow!("no selected entry"))?;
+        let selected = self.selected_action_target_path()?;
         self.enqueue_job(JobKind::Delete, selected, None, "delete queued")
     }
 
@@ -307,6 +295,21 @@ impl App {
         }
         candidate
     }
+
+    fn selected_action_target_path(&self) -> Result<PathBuf> {
+        let entry = self
+            .active_panel()
+            .selected_entry()
+            .ok_or_else(|| anyhow::anyhow!("no selected entry"))?;
+        if entry.is_virtual {
+            return Err(anyhow::anyhow!(
+                "action is not allowed for navigation entry '{}'",
+                entry.name
+            ));
+        }
+
+        Ok(entry.path.clone())
+    }
 }
 
 fn map_key_to_command(key: KeyEvent) -> Option<Command> {
@@ -323,6 +326,7 @@ fn map_key_to_command(key: KeyEvent) -> Option<Command> {
         KeyCode::F(8) => Some(Command::Delete),
         KeyCode::F(2) => Some(Command::ToggleSort),
         KeyCode::Char('r') => Some(Command::Refresh),
+        KeyCode::Char('~') => Some(Command::GoHome),
         KeyCode::Home => Some(Command::GoHome),
         _ => None,
     }

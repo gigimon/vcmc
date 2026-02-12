@@ -44,6 +44,7 @@ pub struct FsEntry {
     pub size_bytes: u64,
     pub modified_at: Option<SystemTime>,
     pub is_hidden: bool,
+    pub is_virtual: bool,
 }
 
 #[derive(Debug, Clone)]

@@ -48,10 +48,14 @@ impl FsAdapter {
                 size_bytes,
                 modified_at,
                 is_hidden,
+                is_virtual: false,
             });
         }
 
         sort_entries(&mut entries, sort_mode);
+        if let Some(parent_path) = dir_path.parent() {
+            entries.insert(0, parent_link(parent_path.to_path_buf()));
+        }
         Ok(entries)
     }
 
@@ -72,6 +76,7 @@ impl FsAdapter {
             size_bytes: metadata.len(),
             modified_at: metadata.modified().ok(),
             is_hidden,
+            is_virtual: false,
         })
     }
 
@@ -213,6 +218,18 @@ impl FsAdapter {
         let cwd = env::current_dir()
             .map_err(|err| AppError::from_io(operation, PathBuf::from("."), err))?;
         Ok(cwd.join(path))
+    }
+}
+
+fn parent_link(parent: PathBuf) -> FsEntry {
+    FsEntry {
+        name: "..".to_string(),
+        path: parent,
+        entry_type: FsEntryType::Directory,
+        size_bytes: 0,
+        modified_at: None,
+        is_hidden: false,
+        is_virtual: true,
     }
 }
 
