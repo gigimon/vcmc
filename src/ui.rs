@@ -1,8 +1,8 @@
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Paragraph};
+use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::model::{AppState, FsEntry, FsEntryType, JobStatus, PanelId, PanelState, SortMode};
 
@@ -12,6 +12,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         .constraints([
             Constraint::Length(1),
             Constraint::Min(1),
+            Constraint::Length(1),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
@@ -40,7 +41,12 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     );
 
     render_status(frame, chunks[2], state);
-    render_help(frame, chunks[3]);
+    render_log(frame, chunks[3], state);
+    render_help(frame, chunks[4]);
+
+    if let Some(prompt) = &state.confirm_prompt {
+        render_confirm_dialog(frame, prompt);
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -170,11 +176,34 @@ fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(status, area);
 }
 
+fn render_log(frame: &mut Frame, area: Rect, state: &AppState) {
+    let latest = state
+        .activity_log
+        .last()
+        .map(String::as_str)
+        .unwrap_or("log: -");
+    let log = Paragraph::new(format!("log: {latest}")).style(Style::default().fg(Color::DarkGray));
+    frame.render_widget(log, area);
+}
+
 fn render_help(frame: &mut Frame, area: Rect) {
     let help = Paragraph::new(
-        "Tab switch  Arrows move  Enter open  Backspace up  Home/~ home  F2 sort  F5/F6/F7/F8 ops  q quit",
+        "Tab switch  Arrows move  Enter open  Backspace up  Home/~ home  F2 sort  F5/F6/F7/F8 ops  y/n confirm  q quit",
     );
     frame.render_widget(help, area);
+}
+
+fn render_confirm_dialog(frame: &mut Frame, prompt: &str) {
+    let area = centered_rect(70, 5, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Confirm")
+        .border_style(Style::default().fg(Color::Yellow));
+    let content = Paragraph::new(prompt)
+        .alignment(Alignment::Center)
+        .block(block);
+    frame.render_widget(content, area);
 }
 
 fn type_style(entry: &FsEntry) -> Style {
@@ -243,4 +272,24 @@ fn human_size(bytes: u64) -> String {
     } else {
         format!("{size:.1}{}", UNITS[unit_idx])
     }
+}
+
+fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
+    let vertical = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(height),
+            Constraint::Min(1),
+        ])
+        .split(area);
+    let horizontal = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Percentage((100 - width_percent) / 2),
+            Constraint::Percentage(width_percent),
+            Constraint::Percentage((100 - width_percent) / 2),
+        ])
+        .split(vertical[1]);
+    horizontal[1]
 }

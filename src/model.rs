@@ -110,6 +110,8 @@ pub struct AppState {
     pub left_panel: PanelState,
     pub right_panel: PanelState,
     pub status_line: String,
+    pub activity_log: Vec<String>,
+    pub confirm_prompt: Option<String>,
     pub jobs: Vec<Job>,
     pub terminal_size: TerminalSize,
 }
@@ -121,6 +123,8 @@ impl AppState {
             left_panel: PanelState::new(cwd.clone()),
             right_panel: PanelState::new(cwd),
             status_line: "Ready".to_string(),
+            activity_log: Vec::new(),
+            confirm_prompt: None,
             jobs: Vec::new(),
             terminal_size: TerminalSize {
                 width: 0,

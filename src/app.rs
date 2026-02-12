@@ -17,6 +17,11 @@ pub struct App {
     fs: FsAdapter,
     workers: WorkerPool,
     next_job_id: u64,
+    pending_confirmation: Option<PendingConfirmation>,
+}
+
+enum PendingConfirmation {
+    Delete { path: PathBuf, name: String },
 }
 
 impl App {
@@ -30,6 +35,7 @@ impl App {
             fs,
             workers,
             next_job_id: 1,
+            pending_confirmation: None,
         };
 
         let _ = app.reload_panel(PanelId::Left, true)?;
@@ -48,7 +54,11 @@ impl App {
     pub fn on_event(&mut self, event: Event) -> bool {
         match event {
             Event::Input(key) => {
-                if let Some(cmd) = map_key_to_command(key) {
+                if let Some(redraw) = self.handle_confirmation_input(&key) {
+                    return redraw;
+                }
+
+                if let Some(cmd) = map_key_to_command(&key) {
                     self.apply_command(cmd)
                 } else {
                     false
@@ -100,7 +110,7 @@ impl App {
         match command_result {
             Ok(should_redraw) => should_redraw,
             Err(err) => {
-                self.state.status_line = err.to_string();
+                self.push_log(err.to_string());
                 true
             }
         }
@@ -130,11 +140,15 @@ impl App {
             self.state.jobs.push(update.into_job());
         }
 
-        self.state.status_line = next_status_line;
+        self.push_log(next_status_line);
 
         if needs_reload {
-            let _ = self.reload_panel(PanelId::Left, false);
-            let _ = self.reload_panel(PanelId::Right, false);
+            if let Err(err) = self.reload_panel(PanelId::Left, false) {
+                self.push_log(format!("refresh left failed: {err}"));
+            }
+            if let Err(err) = self.reload_panel(PanelId::Right, false) {
+                self.push_log(format!("refresh right failed: {err}"));
+            }
         }
 
         true
@@ -194,7 +208,7 @@ impl App {
         };
 
         if entry.entry_type != FsEntryType::Directory {
-            self.state.status_line = format!("{} is not a directory", entry.name);
+            self.push_log(format!("{} is not a directory", entry.name));
             return Ok(true);
         }
 
@@ -242,8 +256,13 @@ impl App {
     }
 
     fn queue_delete(&mut self) -> Result<bool> {
-        let selected = self.selected_action_target_path()?;
-        self.enqueue_job(JobKind::Delete, selected, None, "delete queued")
+        let (path, name) = self.selected_action_target()?;
+        self.pending_confirmation = Some(PendingConfirmation::Delete {
+            path,
+            name: name.clone(),
+        });
+        self.state.confirm_prompt = Some(format!("Delete '{name}' permanently? [y/N]"));
+        Ok(true)
     }
 
     fn queue_mkdir(&mut self) -> Result<bool> {
@@ -256,8 +275,9 @@ impl App {
         kind: JobKind,
         source: PathBuf,
         destination: Option<PathBuf>,
-        queued_message: &str,
+        queued_message: impl Into<String>,
     ) -> Result<bool> {
+        let queued_message = queued_message.into();
         let request = JobRequest {
             id: self.next_job_id,
             kind,
@@ -274,7 +294,7 @@ impl App {
             destination,
             message: Some(queued_message.to_string()),
         });
-        self.state.status_line = queued_message.to_string();
+        self.push_log(queued_message);
         self.workers.submit(request)?;
         Ok(true)
     }
@@ -296,7 +316,7 @@ impl App {
         candidate
     }
 
-    fn selected_action_target_path(&self) -> Result<PathBuf> {
+    fn selected_action_target(&self) -> Result<(PathBuf, String)> {
         let entry = self
             .active_panel()
             .selected_entry()
@@ -308,11 +328,61 @@ impl App {
             ));
         }
 
-        Ok(entry.path.clone())
+        Ok((entry.path.clone(), entry.name.clone()))
+    }
+
+    fn selected_action_target_path(&self) -> Result<PathBuf> {
+        let (path, _) = self.selected_action_target()?;
+        Ok(path)
+    }
+
+    fn handle_confirmation_input(&mut self, key: &KeyEvent) -> Option<bool> {
+        self.pending_confirmation.as_ref()?;
+
+        match key.code {
+            KeyCode::Char('y') | KeyCode::Char('Y') => {
+                let confirmation = self.pending_confirmation.take();
+                self.state.confirm_prompt = None;
+                if let Some(PendingConfirmation::Delete { path, name }) = confirmation {
+                    let result = self.enqueue_job(
+                        JobKind::Delete,
+                        path,
+                        None,
+                        format!("delete queued: {name}"),
+                    );
+                    return Some(match result {
+                        Ok(redraw) => redraw,
+                        Err(err) => {
+                            self.push_log(err.to_string());
+                            true
+                        }
+                    });
+                }
+                Some(true)
+            }
+            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
+                self.pending_confirmation = None;
+                self.state.confirm_prompt = None;
+                self.push_log("delete canceled");
+                Some(true)
+            }
+            _ => Some(false),
+        }
+    }
+
+    fn push_log(&mut self, message: impl Into<String>) {
+        const MAX_ACTIVITY_LOG: usize = 16;
+
+        let message = message.into();
+        self.state.status_line = message.clone();
+        self.state.activity_log.push(message);
+        if self.state.activity_log.len() > MAX_ACTIVITY_LOG {
+            self.state.activity_log.remove(0);
+        }
     }
 }
 
-fn map_key_to_command(key: KeyEvent) -> Option<Command> {
+fn map_key_to_command(key: &KeyEvent) -> Option<Command> {
     match key.code {
         KeyCode::Char('q') => Some(Command::Quit),
         KeyCode::Tab => Some(Command::SwitchPanel),
