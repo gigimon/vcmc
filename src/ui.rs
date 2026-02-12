@@ -48,6 +48,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if let Some(prompt) = &state.rename_prompt {
         render_rename_dialog(frame, prompt.title.as_str(), prompt.value.as_str());
     }
+    if let Some(prompt) = &state.mask_prompt {
+        render_mask_dialog(frame, prompt.title.as_str(), prompt.value.as_str());
+    }
     if let Some(prompt) = &state.confirm_prompt {
         render_confirm_dialog(frame, prompt);
     }
@@ -161,7 +164,10 @@ fn build_entry_lines(
 
     for (offset, entry) in panel.entries[start..end].iter().enumerate() {
         let idx = start + offset;
-        let selected_style = if idx == selected {
+        let is_current = idx == selected;
+        let is_marked = panel.is_selected(entry);
+
+        let base_style = if is_current {
             if panel_active {
                 Style::default()
                     .fg(Color::Black)
@@ -170,6 +176,8 @@ fn build_entry_lines(
             } else {
                 Style::default().bg(Color::DarkGray)
             }
+        } else if is_marked {
+            Style::default().bg(Color::DarkGray)
         } else {
             Style::default()
         };
@@ -189,12 +197,12 @@ fn build_entry_lines(
         let mut spans = Vec::new();
         spans.push(Span::styled(
             format!("{:<name_width$}", name, name_width = name_width),
-            selected_style.patch(type_style(entry)),
+            base_style.patch(type_style(entry)),
         ));
-        spans.push(Span::styled(" ", selected_style));
-        spans.push(Span::styled(format!("{:>9}", size_text), selected_style));
-        spans.push(Span::styled(" ", selected_style));
-        spans.push(Span::styled(format!("{:>16}", mtime_text), selected_style));
+        spans.push(Span::styled(" ", base_style));
+        spans.push(Span::styled(format!("{:>9}", size_text), base_style));
+        spans.push(Span::styled(" ", base_style));
+        spans.push(Span::styled(format!("{:>16}", mtime_text), base_style));
         lines.push(Line::from(spans));
     }
 
@@ -202,7 +210,17 @@ fn build_entry_lines(
 }
 
 fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
-    let status = Paragraph::new(state.status_line.clone())
+    let panel = match state.active_panel {
+        PanelId::Left => &state.left_panel,
+        PanelId::Right => &state.right_panel,
+    };
+    let (selected_count, selected_bytes) = panel.selection_summary();
+    let suffix = if selected_count == 0 {
+        " | sel:0".to_string()
+    } else {
+        format!(" | sel:{selected_count} ({})", human_size(selected_bytes))
+    };
+    let status = Paragraph::new(format!("{}{}", state.status_line, suffix))
         .style(Style::default().fg(Color::White).bg(Color::DarkGray));
     frame.render_widget(status, area);
 }
@@ -219,7 +237,7 @@ fn render_log(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_help(frame: &mut Frame, area: Rect) {
     let help = Paragraph::new(
-        "Tab switch  Arrows move  Enter open  Backspace up  / search  Home/~ home  F2 sort  F5/F6 rename-op  F7 mkdir  F8 delete  y/n confirm  any-key close alert  q quit",
+        "Tab switch  Arrows move  Shift+Arrows range  Space/Ins mark  +/-/* mask ops  / search  F5/F6 rename-op  F7 mkdir  F8 delete  q quit",
     );
     frame.render_widget(help, area);
 }
@@ -232,6 +250,17 @@ fn render_rename_dialog(frame: &mut Frame, title: &str, value: &str) {
         .title(title)
         .border_style(Style::default().fg(Color::Cyan));
     let content = Paragraph::new(format!("{value}\n\nEnter apply, Esc cancel")).block(block);
+    frame.render_widget(content, area);
+}
+
+fn render_mask_dialog(frame: &mut Frame, title: &str, value: &str) {
+    let area = centered_rect(70, 6, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(title)
+        .border_style(Style::default().fg(Color::Yellow));
+    let content = Paragraph::new(format!("{value}\n\nWildcard: * and ?")).block(block);
     frame.render_widget(content, area);
 }
 

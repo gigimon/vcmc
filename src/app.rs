@@ -19,6 +19,7 @@ pub struct App {
     next_job_id: u64,
     pending_confirmation: Option<PendingConfirmation>,
     pending_rename: Option<PendingRename>,
+    pending_mask: Option<PendingMask>,
     input_mode: Option<InputMode>,
 }
 
@@ -35,6 +36,11 @@ struct PendingRename {
     source_path: PathBuf,
     source_name: String,
     destination_dir: PathBuf,
+}
+
+struct PendingMask {
+    panel_id: PanelId,
+    select: bool,
 }
 
 enum InputMode {
@@ -54,6 +60,7 @@ impl App {
             next_job_id: 1,
             pending_confirmation: None,
             pending_rename: None,
+            pending_mask: None,
             input_mode: None,
         };
 
@@ -82,6 +89,10 @@ impl App {
                 }
 
                 if let Some(redraw) = self.handle_rename_input(&key) {
+                    return redraw;
+                }
+
+                if let Some(redraw) = self.handle_mask_input(&key) {
                     return redraw;
                 }
 
@@ -117,17 +128,23 @@ impl App {
                 };
                 self.input_mode = None;
                 self.pending_rename = None;
+                self.pending_mask = None;
                 self.state.rename_prompt = None;
+                self.state.mask_prompt = None;
                 Ok(true)
             }
             Command::MoveSelectionUp => {
                 self.active_panel_mut().move_selection_up();
+                self.active_panel_mut().clear_selection_anchor();
                 Ok(true)
             }
             Command::MoveSelectionDown => {
                 self.active_panel_mut().move_selection_down();
+                self.active_panel_mut().clear_selection_anchor();
                 Ok(true)
             }
+            Command::SelectRangeUp => self.select_range_up(),
+            Command::SelectRangeDown => self.select_range_down(),
             Command::Refresh => self
                 .reload_panel(PanelId::Left, true)
                 .and_then(|_| self.reload_panel(PanelId::Right, false)),
@@ -140,6 +157,10 @@ impl App {
             Command::Mkdir => self.queue_mkdir(),
             Command::ToggleSort => self.toggle_sort(),
             Command::StartSearch => self.start_search(),
+            Command::ToggleSelectCurrent => self.toggle_select_current(),
+            Command::StartSelectByMask => self.start_mask_prompt(true),
+            Command::StartDeselectByMask => self.start_mask_prompt(false),
+            Command::InvertSelection => self.invert_selection(),
         };
 
         match command_result {
@@ -285,6 +306,8 @@ impl App {
 
     fn start_search(&mut self) -> Result<bool> {
         let panel_id = self.state.active_panel;
+        self.pending_mask = None;
+        self.state.mask_prompt = None;
         self.input_mode = Some(InputMode::Search(panel_id));
         let query = self.panel_mut(panel_id).search_query.clone();
         if query.is_empty() {
@@ -293,6 +316,63 @@ impl App {
             self.state.status_line = format!("search: {query}");
         }
         Ok(true)
+    }
+
+    fn toggle_select_current(&mut self) -> Result<bool> {
+        let panel = self.active_panel_mut();
+        let changed = panel.toggle_current_selection();
+        panel.clear_selection_anchor();
+        self.update_selection_status();
+        Ok(changed)
+    }
+
+    fn select_range_up(&mut self) -> Result<bool> {
+        let panel = self.active_panel_mut();
+        let previous = panel.selected_index;
+        panel.move_selection_up();
+        let current = panel.selected_index;
+        let changed = panel.select_range_from_anchor(previous, current);
+        self.update_selection_status();
+        Ok(changed > 0 || previous != current)
+    }
+
+    fn select_range_down(&mut self) -> Result<bool> {
+        let panel = self.active_panel_mut();
+        let previous = panel.selected_index;
+        panel.move_selection_down();
+        let current = panel.selected_index;
+        let changed = panel.select_range_from_anchor(previous, current);
+        self.update_selection_status();
+        Ok(changed > 0 || previous != current)
+    }
+
+    fn start_mask_prompt(&mut self, select: bool) -> Result<bool> {
+        let panel_id = self.state.active_panel;
+        self.input_mode = None;
+        self.pending_rename = None;
+        self.state.rename_prompt = None;
+        self.pending_mask = Some(PendingMask { panel_id, select });
+        self.state.mask_prompt = Some(RenamePrompt {
+            title: if select {
+                "Select by mask (Enter apply, Esc cancel)".to_string()
+            } else {
+                "Deselect by mask (Enter apply, Esc cancel)".to_string()
+            },
+            value: "*".to_string(),
+        });
+        self.state.status_line = if select {
+            "select by mask".to_string()
+        } else {
+            "deselect by mask".to_string()
+        };
+        Ok(true)
+    }
+
+    fn invert_selection(&mut self) -> Result<bool> {
+        let changed = self.active_panel_mut().invert_selection();
+        self.active_panel_mut().clear_selection_anchor();
+        self.update_selection_status();
+        Ok(changed > 0)
     }
 
     fn queue_copy(&mut self) -> Result<bool> {
@@ -333,6 +413,8 @@ impl App {
 
     fn open_rename_prompt(&mut self, kind: JobKind, entry: &FsEntry) -> Result<bool> {
         self.input_mode = None;
+        self.pending_mask = None;
+        self.state.mask_prompt = None;
         let destination_dir = self.inactive_panel_cwd();
         self.pending_rename = Some(PendingRename {
             kind,
@@ -491,6 +573,7 @@ impl App {
             KeyCode::Esc => {
                 self.pending_rename = None;
                 self.state.rename_prompt = None;
+                self.state.mask_prompt = None;
                 self.push_log("copy/move canceled");
                 Some(true)
             }
@@ -563,6 +646,66 @@ impl App {
         }
     }
 
+    fn handle_mask_input(&mut self, key: &KeyEvent) -> Option<bool> {
+        self.pending_mask.as_ref()?;
+        self.state.mask_prompt.as_ref()?;
+
+        match key.code {
+            KeyCode::Esc => {
+                self.pending_mask = None;
+                self.state.mask_prompt = None;
+                self.push_log("mask selection canceled");
+                Some(true)
+            }
+            KeyCode::Enter => {
+                let pending = self.pending_mask.take();
+                let mask = self
+                    .state
+                    .mask_prompt
+                    .as_ref()
+                    .map(|prompt| prompt.value.clone())
+                    .unwrap_or_default();
+                self.state.mask_prompt = None;
+
+                let Some(pending) = pending else {
+                    return Some(true);
+                };
+
+                let changed = if pending.select {
+                    self.panel_mut(pending.panel_id)
+                        .select_by_mask(mask.as_str())
+                } else {
+                    self.panel_mut(pending.panel_id)
+                        .deselect_by_mask(mask.as_str())
+                };
+                self.update_selection_status();
+                self.push_log(if pending.select {
+                    format!("selected {changed} by mask")
+                } else {
+                    format!("deselected {changed} by mask")
+                });
+                Some(true)
+            }
+            KeyCode::Backspace => {
+                if let Some(prompt) = self.state.mask_prompt.as_mut() {
+                    prompt.value.pop();
+                }
+                Some(true)
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                if c != '\0' {
+                    if let Some(prompt) = self.state.mask_prompt.as_mut() {
+                        prompt.value.push(c);
+                    }
+                }
+                Some(true)
+            }
+            _ => Some(false),
+        }
+    }
+
     fn handle_search_input(&mut self, key: &KeyEvent) -> Option<bool> {
         let panel_id = match self.input_mode {
             Some(InputMode::Search(panel_id)) => panel_id,
@@ -612,6 +755,16 @@ impl App {
         }
     }
 
+    fn update_selection_status(&mut self) {
+        let panel = self.active_panel();
+        let (count, bytes) = panel.selection_summary();
+        if count == 0 {
+            self.state.status_line = "selection: none".to_string();
+        } else {
+            self.state.status_line = format!("selection: {count} item(s), {}", format_bytes(bytes));
+        }
+    }
+
     fn push_log(&mut self, message: impl Into<String>) {
         const MAX_ACTIVITY_LOG: usize = 16;
 
@@ -634,10 +787,18 @@ fn map_key_to_command(key: &KeyEvent) -> Option<Command> {
     match key.code {
         KeyCode::Char('q') => Some(Command::Quit),
         KeyCode::Tab => Some(Command::SwitchPanel),
+        KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => Some(Command::SelectRangeUp),
+        KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
+            Some(Command::SelectRangeDown)
+        }
         KeyCode::Up => Some(Command::MoveSelectionUp),
         KeyCode::Down => Some(Command::MoveSelectionDown),
         KeyCode::Enter => Some(Command::OpenSelected),
         KeyCode::Backspace => Some(Command::GoToParent),
+        KeyCode::Char(' ') | KeyCode::Insert => Some(Command::ToggleSelectCurrent),
+        KeyCode::Char('+') => Some(Command::StartSelectByMask),
+        KeyCode::Char('-') => Some(Command::StartDeselectByMask),
+        KeyCode::Char('*') => Some(Command::InvertSelection),
         KeyCode::F(5) => Some(Command::Copy),
         KeyCode::F(6) => Some(Command::Move),
         KeyCode::F(7) => Some(Command::Mkdir),
@@ -650,5 +811,20 @@ fn map_key_to_command(key: &KeyEvent) -> Option<Command> {
         KeyCode::Char('~') => Some(Command::GoHome),
         KeyCode::Home => Some(Command::GoHome),
         _ => None,
+    }
+}
+
+fn format_bytes(bytes: u64) -> String {
+    const UNITS: [&str; 5] = ["B", "K", "M", "G", "T"];
+    let mut size = bytes as f64;
+    let mut idx = 0usize;
+    while size >= 1024.0 && idx < UNITS.len() - 1 {
+        size /= 1024.0;
+        idx += 1;
+    }
+    if idx == 0 {
+        format!("{bytes}{}", UNITS[idx])
+    } else {
+        format!("{size:.1}{}", UNITS[idx])
     }
 }
