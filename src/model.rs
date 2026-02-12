@@ -143,6 +143,7 @@ pub struct AppState {
     pub status_line: String,
     pub activity_log: Vec<String>,
     pub confirm_prompt: Option<String>,
+    pub alert_prompt: Option<String>,
     pub jobs: Vec<Job>,
     pub terminal_size: TerminalSize,
 }
@@ -156,6 +157,7 @@ impl AppState {
             status_line: "Ready".to_string(),
             activity_log: Vec::new(),
             confirm_prompt: None,
+            alert_prompt: None,
             jobs: Vec::new(),
             terminal_size: TerminalSize {
                 width: 0,

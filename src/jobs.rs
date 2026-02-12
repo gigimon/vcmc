@@ -73,12 +73,12 @@ fn worker_loop(request_rx: Receiver<JobRequest>, event_tx: Sender<Event>) {
             Ok(final_destination) => (
                 JobStatus::Done,
                 final_destination.or(request.destination.clone()),
-                Some("done".to_string()),
+                Some(format_job_success(&request)),
             ),
             Err(err) => (
                 JobStatus::Failed,
                 request.destination.clone(),
-                Some(err.to_string()),
+                Some(format_job_error(&request, &err)),
             ),
         };
 
@@ -123,6 +123,48 @@ fn execute_job(fs: &FsAdapter, request: &JobRequest) -> Result<Option<std::path:
         crate::model::JobKind::Mkdir => {
             fs.create_dir(&request.source)?;
             Ok(None)
+        }
+    }
+}
+
+fn format_job_success(request: &JobRequest) -> String {
+    match request.kind {
+        crate::model::JobKind::Copy => format!("copy done: {}", request.source.display()),
+        crate::model::JobKind::Move => format!("move done: {}", request.source.display()),
+        crate::model::JobKind::Delete => format!("delete done: {}", request.source.display()),
+        crate::model::JobKind::Mkdir => format!("mkdir done: {}", request.source.display()),
+    }
+}
+
+fn format_job_error(request: &JobRequest, err: &anyhow::Error) -> String {
+    let dst = request
+        .destination
+        .as_ref()
+        .map(|path| path.display().to_string())
+        .unwrap_or_else(|| "-".to_string());
+
+    match request.kind {
+        crate::model::JobKind::Copy => format!(
+            "copy failed: src={} dst={} reason={err}",
+            request.source.display(),
+            dst
+        ),
+        crate::model::JobKind::Move => format!(
+            "move failed: src={} dst={} reason={err}",
+            request.source.display(),
+            dst
+        ),
+        crate::model::JobKind::Delete => {
+            format!(
+                "delete failed: target={} reason={err}",
+                request.source.display()
+            )
+        }
+        crate::model::JobKind::Mkdir => {
+            format!(
+                "mkdir failed: target={} reason={err}",
+                request.source.display()
+            )
         }
     }
 }

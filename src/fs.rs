@@ -105,6 +105,7 @@ impl FsAdapter {
     pub fn move_path(&self, source: &Path, destination: &Path) -> AppResult<PathBuf> {
         let source_path = self.normalize_existing_path("move", source)?;
         let destination_path = self.resolve_destination_path("move", &source_path, destination)?;
+        self.ensure_destination_is_safe("move", &source_path, &destination_path)?;
 
         if source_path == destination_path {
             return Err(AppError::invalid_path(
@@ -128,6 +129,7 @@ impl FsAdapter {
     pub fn copy_path(&self, source: &Path, destination: &Path) -> AppResult<PathBuf> {
         let source_path = self.normalize_existing_path("copy", source)?;
         let destination_path = self.resolve_destination_path("copy", &source_path, destination)?;
+        self.ensure_destination_is_safe("copy", &source_path, &destination_path)?;
 
         if source_path == destination_path {
             return Err(AppError::invalid_path(
@@ -207,7 +209,16 @@ impl FsAdapter {
             }
         }
 
-        self.normalize_new_path(operation, &destination_path)
+        let normalized_destination = self.normalize_new_path(operation, &destination_path)?;
+        if path_exists(&normalized_destination)? {
+            return Err(AppError::conflict(
+                operation,
+                normalized_destination,
+                "destination already exists",
+            ));
+        }
+
+        Ok(normalized_destination)
     }
 
     fn absolute_path(&self, operation: &'static str, path: &Path) -> AppResult<PathBuf> {
@@ -219,6 +230,33 @@ impl FsAdapter {
             .map_err(|err| AppError::from_io(operation, PathBuf::from("."), err))?;
         Ok(cwd.join(path))
     }
+
+    fn ensure_destination_is_safe(
+        &self,
+        operation: &'static str,
+        source: &Path,
+        destination: &Path,
+    ) -> AppResult<()> {
+        let source_meta = fs::symlink_metadata(source)
+            .map_err(|err| AppError::from_io(operation, source.to_path_buf(), err))?;
+        if source_meta.file_type().is_dir()
+            && !source_meta.file_type().is_symlink()
+            && destination.starts_with(source)
+        {
+            return Err(AppError::invalid_path(
+                operation,
+                destination.to_path_buf(),
+                "destination cannot be nested under source directory",
+            ));
+        }
+
+        Ok(())
+    }
+}
+
+fn path_exists(path: &Path) -> AppResult<bool> {
+    path.try_exists()
+        .map_err(|err| AppError::from_io("stat", path.to_path_buf(), err))
 }
 
 fn parent_link(parent: PathBuf) -> FsEntry {

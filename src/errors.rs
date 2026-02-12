@@ -30,6 +30,12 @@ pub enum AppError {
         path: PathBuf,
         reason: String,
     },
+    #[error("conflict during {operation}: {path} ({reason})")]
+    Conflict {
+        operation: &'static str,
+        path: PathBuf,
+        reason: String,
+    },
 }
 
 pub type AppResult<T> = Result<T, AppError>;
@@ -53,6 +59,18 @@ impl AppError {
         reason: impl Into<String>,
     ) -> Self {
         Self::InvalidPath {
+            operation,
+            path: path.into(),
+            reason: reason.into(),
+        }
+    }
+
+    pub fn conflict(
+        operation: &'static str,
+        path: impl Into<PathBuf>,
+        reason: impl Into<String>,
+    ) -> Self {
+        Self::Conflict {
             operation,
             path: path.into(),
             reason: reason.into(),

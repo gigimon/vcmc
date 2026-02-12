@@ -47,6 +47,9 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     if let Some(prompt) = &state.confirm_prompt {
         render_confirm_dialog(frame, prompt);
     }
+    if let Some(prompt) = &state.alert_prompt {
+        render_alert_dialog(frame, prompt);
+    }
 }
 
 fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
@@ -189,7 +192,7 @@ fn render_log(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_help(frame: &mut Frame, area: Rect) {
     let help = Paragraph::new(
-        "Tab switch  Arrows move  Enter open  Backspace up  / search  Home/~ home  F2 sort  F5/F6/F7/F8 ops  y/n confirm  q quit",
+        "Tab switch  Arrows move  Enter open  Backspace up  / search  Home/~ home  F2 sort  F5/F6/F7/F8 ops  y/n confirm  any-key close alert  q quit",
     );
     frame.render_widget(help, area);
 }
@@ -202,6 +205,19 @@ fn render_confirm_dialog(frame: &mut Frame, prompt: &str) {
         .title("Confirm")
         .border_style(Style::default().fg(Color::Yellow));
     let content = Paragraph::new(prompt)
+        .alignment(Alignment::Center)
+        .block(block);
+    frame.render_widget(content, area);
+}
+
+fn render_alert_dialog(frame: &mut Frame, prompt: &str) {
+    let area = centered_rect(80, 6, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title("Error")
+        .border_style(Style::default().fg(Color::Red));
+    let content = Paragraph::new(format!("{prompt}\n\nPress any key"))
         .alignment(Alignment::Center)
         .block(block);
     frame.render_widget(content, area);

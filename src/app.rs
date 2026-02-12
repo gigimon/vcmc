@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
@@ -7,8 +7,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::fs::FsAdapter;
 use crate::jobs::WorkerPool;
 use crate::model::{
-    AppState, Command, Event, FsEntryType, Job, JobKind, JobRequest, JobStatus, JobUpdate, PanelId,
-    TerminalSize,
+    AppState, Command, Event, FsEntry, FsEntryType, Job, JobKind, JobRequest, JobStatus, JobUpdate,
+    PanelId, TerminalSize,
 };
 
 pub struct App {
@@ -22,7 +22,11 @@ pub struct App {
 }
 
 enum PendingConfirmation {
-    Delete { path: PathBuf, name: String },
+    Delete {
+        path: PathBuf,
+        name: String,
+        is_directory: bool,
+    },
 }
 
 enum InputMode {
@@ -60,6 +64,10 @@ impl App {
     pub fn on_event(&mut self, event: Event) -> bool {
         match event {
             Event::Input(key) => {
+                if let Some(redraw) = self.handle_alert_input() {
+                    return redraw;
+                }
+
                 if let Some(redraw) = self.handle_confirmation_input(&key) {
                     return redraw;
                 }
@@ -122,7 +130,7 @@ impl App {
         match command_result {
             Ok(should_redraw) => should_redraw,
             Err(err) => {
-                self.push_log(err.to_string());
+                self.show_alert(err.to_string());
                 true
             }
         }
@@ -130,6 +138,7 @@ impl App {
 
     fn handle_job_update(&mut self, update: JobUpdate) -> bool {
         let needs_reload = update.status == JobStatus::Done;
+        let has_failed = update.status == JobStatus::Failed;
         let next_status_line = match update.status {
             JobStatus::Failed => update
                 .message
@@ -152,14 +161,18 @@ impl App {
             self.state.jobs.push(update.into_job());
         }
 
-        self.push_log(next_status_line);
+        if has_failed {
+            self.show_alert(next_status_line);
+        } else {
+            self.push_log(next_status_line);
+        }
 
         if needs_reload {
             if let Err(err) = self.reload_panel(PanelId::Left, false) {
-                self.push_log(format!("refresh left failed: {err}"));
+                self.show_alert(format!("refresh left failed: {err}"));
             }
             if let Err(err) = self.reload_panel(PanelId::Right, false) {
-                self.push_log(format!("refresh right failed: {err}"));
+                self.show_alert(format!("refresh right failed: {err}"));
             }
         }
 
@@ -268,24 +281,35 @@ impl App {
     }
 
     fn queue_copy(&mut self) -> Result<bool> {
-        let selected = self.selected_action_target_path()?;
+        let selected = self.selected_action_target_entry()?.path;
         let target = self.inactive_panel_cwd();
         self.enqueue_job(JobKind::Copy, selected, Some(target), "copy queued")
     }
 
     fn queue_move(&mut self) -> Result<bool> {
-        let selected = self.selected_action_target_path()?;
+        let selected = self.selected_action_target_entry()?.path;
         let target = self.inactive_panel_cwd();
         self.enqueue_job(JobKind::Move, selected, Some(target), "move queued")
     }
 
     fn queue_delete(&mut self) -> Result<bool> {
-        let (path, name) = self.selected_action_target()?;
+        let entry = self.selected_action_target_entry()?;
+        let path = self.fs.normalize_existing_path("delete", &entry.path)?;
+        self.guard_delete_target(&path)?;
+
         self.pending_confirmation = Some(PendingConfirmation::Delete {
             path,
-            name: name.clone(),
+            name: entry.name.clone(),
+            is_directory: entry.entry_type == FsEntryType::Directory,
         });
-        self.state.confirm_prompt = Some(format!("Delete '{name}' permanently? [y/N]"));
+        self.state.confirm_prompt = Some(if entry.entry_type == FsEntryType::Directory {
+            format!(
+                "Delete directory '{}' recursively and permanently? [y/N]",
+                entry.name
+            )
+        } else {
+            format!("Delete '{}' permanently? [y/N]", entry.name)
+        });
         Ok(true)
     }
 
@@ -340,11 +364,12 @@ impl App {
         candidate
     }
 
-    fn selected_action_target(&self) -> Result<(PathBuf, String)> {
+    fn selected_action_target_entry(&self) -> Result<FsEntry> {
         let entry = self
             .active_panel()
             .selected_entry()
-            .ok_or_else(|| anyhow::anyhow!("no selected entry"))?;
+            .ok_or_else(|| anyhow::anyhow!("no selected entry"))?
+            .clone();
         if entry.is_virtual {
             return Err(anyhow::anyhow!(
                 "action is not allowed for navigation entry '{}'",
@@ -352,12 +377,29 @@ impl App {
             ));
         }
 
-        Ok((entry.path.clone(), entry.name.clone()))
+        Ok(entry)
     }
 
-    fn selected_action_target_path(&self) -> Result<PathBuf> {
-        let (path, _) = self.selected_action_target()?;
-        Ok(path)
+    fn guard_delete_target(&self, target: &PathBuf) -> Result<()> {
+        if target == Path::new("/") {
+            return Err(anyhow::anyhow!(
+                "refusing to delete root directory '/' in interactive mode"
+            ));
+        }
+
+        if let Some(home) = std::env::var_os("HOME") {
+            let home_path = self
+                .fs
+                .normalize_existing_path("delete", &PathBuf::from(home))?;
+            if *target == home_path {
+                return Err(anyhow::anyhow!(
+                    "refusing to delete HOME directory: {}",
+                    home_path.display()
+                ));
+            }
+        }
+
+        Ok(())
     }
 
     fn handle_confirmation_input(&mut self, key: &KeyEvent) -> Option<bool> {
@@ -367,17 +409,22 @@ impl App {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 let confirmation = self.pending_confirmation.take();
                 self.state.confirm_prompt = None;
-                if let Some(PendingConfirmation::Delete { path, name }) = confirmation {
-                    let result = self.enqueue_job(
-                        JobKind::Delete,
-                        path,
-                        None,
-                        format!("delete queued: {name}"),
-                    );
+                if let Some(PendingConfirmation::Delete {
+                    path,
+                    name,
+                    is_directory,
+                }) = confirmation
+                {
+                    let description = if is_directory {
+                        format!("delete queued (recursive): {name}")
+                    } else {
+                        format!("delete queued: {name}")
+                    };
+                    let result = self.enqueue_job(JobKind::Delete, path, None, description);
                     return Some(match result {
                         Ok(redraw) => redraw,
                         Err(err) => {
-                            self.push_log(err.to_string());
+                            self.show_alert(err.to_string());
                             true
                         }
                     });
@@ -392,6 +439,12 @@ impl App {
             }
             _ => Some(false),
         }
+    }
+
+    fn handle_alert_input(&mut self) -> Option<bool> {
+        self.state.alert_prompt.as_ref()?;
+        self.state.alert_prompt = None;
+        Some(true)
     }
 
     fn handle_search_input(&mut self, key: &KeyEvent) -> Option<bool> {
@@ -452,6 +505,12 @@ impl App {
         if self.state.activity_log.len() > MAX_ACTIVITY_LOG {
             self.state.activity_log.remove(0);
         }
+    }
+
+    fn show_alert(&mut self, message: impl Into<String>) {
+        let message = message.into();
+        self.state.alert_prompt = Some(message.clone());
+        self.push_log(message);
     }
 }
 
