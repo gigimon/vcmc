@@ -8,8 +8,8 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use crate::fs::FsAdapter;
 use crate::jobs::WorkerPool;
 use crate::model::{
-    AppState, Command, Event, FsEntry, FsEntryType, Job, JobKind, JobRequest, JobStatus, JobUpdate,
-    PanelId, RenamePrompt, TerminalSize,
+    AppState, Command, DialogButton, DialogButtonRole, DialogState, DialogTone, Event, FsEntry,
+    FsEntryType, Job, JobKind, JobRequest, JobStatus, JobUpdate, PanelId, TerminalSize,
 };
 
 pub struct App {
@@ -107,19 +107,7 @@ impl App {
     pub fn on_event(&mut self, event: Event) -> bool {
         match event {
             Event::Input(key) => {
-                if let Some(redraw) = self.handle_alert_input(&key) {
-                    return redraw;
-                }
-
-                if let Some(redraw) = self.handle_confirmation_input(&key) {
-                    return redraw;
-                }
-
-                if let Some(redraw) = self.handle_rename_input(&key) {
-                    return redraw;
-                }
-
-                if let Some(redraw) = self.handle_mask_input(&key) {
+                if let Some(redraw) = self.handle_dialog_input(&key) {
                     return redraw;
                 }
 
@@ -154,10 +142,10 @@ impl App {
                     PanelId::Right => PanelId::Left,
                 };
                 self.input_mode = None;
+                self.pending_confirmation = None;
                 self.pending_rename = None;
                 self.pending_mask = None;
-                self.state.rename_prompt = None;
-                self.state.mask_prompt = None;
+                self.state.dialog = None;
                 Ok(true)
             }
             Command::MoveSelectionUp => {
@@ -403,8 +391,10 @@ impl App {
 
     fn start_search(&mut self) -> Result<bool> {
         let panel_id = self.state.active_panel;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
         self.pending_mask = None;
-        self.state.mask_prompt = None;
+        self.state.dialog = None;
         self.input_mode = Some(InputMode::Search(panel_id));
         let query = self.panel_mut(panel_id).search_query.clone();
         if query.is_empty() {
@@ -446,17 +436,20 @@ impl App {
     fn start_mask_prompt(&mut self, select: bool) -> Result<bool> {
         let panel_id = self.state.active_panel;
         self.input_mode = None;
+        self.pending_confirmation = None;
         self.pending_rename = None;
-        self.state.rename_prompt = None;
         self.pending_mask = Some(PendingMask { panel_id, select });
-        self.state.mask_prompt = Some(RenamePrompt {
-            title: if select {
-                "Select by mask (Enter apply, Esc cancel)".to_string()
-            } else {
-                "Deselect by mask (Enter apply, Esc cancel)".to_string()
-            },
-            value: "*".to_string(),
-        });
+        let title = if select {
+            "Select by mask"
+        } else {
+            "Deselect by mask"
+        };
+        self.state.dialog = Some(input_dialog(
+            title,
+            "Wildcard: * and ?",
+            "*".to_string(),
+            DialogTone::Warning,
+        ));
         self.state.status_line = if select {
             "select by mask".to_string()
         } else {
@@ -474,7 +467,7 @@ impl App {
 
     fn queue_copy(&mut self) -> Result<bool> {
         if let Some(plan) = self.build_batch_plan_from_selection(JobKind::Copy)? {
-            self.state.confirm_prompt = Some(plan.summary.clone());
+            self.state.dialog = Some(confirm_dialog(plan.summary.clone()));
             self.pending_confirmation = Some(PendingConfirmation::Batch(plan));
             return Ok(true);
         }
@@ -485,7 +478,7 @@ impl App {
 
     fn queue_move(&mut self) -> Result<bool> {
         if let Some(plan) = self.build_batch_plan_from_selection(JobKind::Move)? {
-            self.state.confirm_prompt = Some(plan.summary.clone());
+            self.state.dialog = Some(confirm_dialog(plan.summary.clone()));
             self.pending_confirmation = Some(PendingConfirmation::Batch(plan));
             return Ok(true);
         }
@@ -496,7 +489,7 @@ impl App {
 
     fn queue_delete(&mut self) -> Result<bool> {
         if let Some(plan) = self.build_batch_plan_from_selection(JobKind::Delete)? {
-            self.state.confirm_prompt = Some(plan.summary.clone());
+            self.state.dialog = Some(confirm_dialog(plan.summary.clone()));
             self.pending_confirmation = Some(PendingConfirmation::Batch(plan));
             return Ok(true);
         }
@@ -510,14 +503,16 @@ impl App {
             name: entry.name.clone(),
             is_directory: entry.entry_type == FsEntryType::Directory,
         });
-        self.state.confirm_prompt = Some(if entry.entry_type == FsEntryType::Directory {
-            format!(
-                "Delete directory '{}' recursively and permanently? [y/N]",
-                entry.name
-            )
-        } else {
-            format!("Delete '{}' permanently? [y/N]", entry.name)
-        });
+        self.state.dialog = Some(confirm_dialog(
+            if entry.entry_type == FsEntryType::Directory {
+                format!(
+                    "Delete directory '{}' recursively and permanently?",
+                    entry.name
+                )
+            } else {
+                format!("Delete '{}' permanently?", entry.name)
+            },
+        ));
         Ok(true)
     }
 
@@ -624,8 +619,8 @@ impl App {
 
     fn open_rename_prompt(&mut self, kind: JobKind, entry: &FsEntry) -> Result<bool> {
         self.input_mode = None;
+        self.pending_confirmation = None;
         self.pending_mask = None;
-        self.state.mask_prompt = None;
         let destination_dir = self.inactive_panel_cwd();
         self.pending_rename = Some(PendingRename {
             kind,
@@ -639,10 +634,12 @@ impl App {
             JobKind::Move => "Move as",
             _ => "Rename as",
         };
-        self.state.rename_prompt = Some(RenamePrompt {
-            title: format!("{verb} (Enter apply, Esc cancel)"),
-            value: entry.name.clone(),
-        });
+        self.state.dialog = Some(input_dialog(
+            verb,
+            "Use Tab/Shift+Tab or Left/Right to focus buttons",
+            entry.name.clone(),
+            DialogTone::Default,
+        ));
         self.state.status_line = format!("{verb}: {}", entry.name);
         Ok(true)
     }
@@ -784,195 +781,270 @@ impl App {
         Ok(())
     }
 
-    fn handle_confirmation_input(&mut self, key: &KeyEvent) -> Option<bool> {
-        self.pending_confirmation.as_ref()?;
+    fn handle_dialog_input(&mut self, key: &KeyEvent) -> Option<bool> {
+        self.state.dialog.as_ref()?;
+
+        if let Some(accel) = accelerator_from_key(key) {
+            if let Some(role) = self.find_dialog_button_by_accelerator(accel) {
+                return Some(self.activate_dialog_button(role));
+            }
+        }
 
         match key.code {
-            KeyCode::Char('y') | KeyCode::Char('Y') => {
-                let confirmation = self.pending_confirmation.take();
-                self.state.confirm_prompt = None;
-                if let Some(confirmation) = confirmation {
-                    let result = match confirmation {
-                        PendingConfirmation::DeleteOne {
-                            path,
-                            name,
-                            is_directory,
-                        } => {
-                            let description = if is_directory {
-                                format!("delete queued (recursive): {name}")
-                            } else {
-                                format!("delete queued: {name}")
-                            };
-                            self.enqueue_job(JobKind::Delete, path, None, description)
-                        }
-                        PendingConfirmation::Batch(plan) => self.execute_batch_plan(plan),
-                    };
-
-                    return Some(match result {
-                        Ok(redraw) => redraw,
-                        Err(err) => {
-                            self.show_alert(err.to_string());
-                            true
-                        }
-                    });
+            KeyCode::Esc => Some(self.cancel_dialog()),
+            KeyCode::Tab | KeyCode::Right => {
+                if let Some(dialog) = self.state.dialog.as_mut() {
+                    dialog.focus_next();
                 }
                 Some(true)
             }
-            KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
+            KeyCode::BackTab | KeyCode::Left => {
+                if let Some(dialog) = self.state.dialog.as_mut() {
+                    dialog.focus_prev();
+                }
+                Some(true)
+            }
+            KeyCode::Enter => {
+                let role = self
+                    .state
+                    .dialog
+                    .as_ref()
+                    .and_then(DialogState::focused_button)
+                    .map(|button| button.role)
+                    .unwrap_or(DialogButtonRole::Primary);
+                Some(self.activate_dialog_button(role))
+            }
+            KeyCode::Backspace => Some(self.edit_dialog_input_backspace()),
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                Some(self.edit_dialog_input_char(c))
+            }
+            _ => Some(false),
+        }
+    }
+
+    fn activate_dialog_button(&mut self, role: DialogButtonRole) -> bool {
+        if self.pending_confirmation.is_some() {
+            return if role == DialogButtonRole::Primary {
+                self.apply_confirmation()
+            } else {
                 self.pending_confirmation = None;
-                self.state.confirm_prompt = None;
+                self.state.dialog = None;
                 self.push_log("operation canceled");
-                Some(true)
-            }
-            _ => Some(false),
+                true
+            };
         }
-    }
 
-    fn handle_alert_input(&mut self, _key: &KeyEvent) -> Option<bool> {
-        self.state.alert_prompt.as_ref()?;
-        self.state.alert_prompt = None;
-        Some(true)
-    }
-
-    fn handle_rename_input(&mut self, key: &KeyEvent) -> Option<bool> {
-        self.pending_rename.as_ref()?;
-        self.state.rename_prompt.as_ref()?;
-
-        match key.code {
-            KeyCode::Esc => {
+        if self.pending_rename.is_some() {
+            return if role == DialogButtonRole::Primary {
+                self.apply_rename()
+            } else {
                 self.pending_rename = None;
-                self.state.rename_prompt = None;
-                self.state.mask_prompt = None;
+                self.state.dialog = None;
                 self.push_log("copy/move canceled");
-                Some(true)
-            }
-            KeyCode::Enter => {
-                let pending = self.pending_rename.take();
-                let requested_name = self
-                    .state
-                    .rename_prompt
-                    .as_ref()
-                    .map(|prompt| prompt.value.trim().to_string())
-                    .unwrap_or_default();
-                self.state.rename_prompt = None;
+                true
+            };
+        }
 
-                let Some(pending) = pending else {
-                    return Some(true);
-                };
+        if self.pending_mask.is_some() {
+            return if role == DialogButtonRole::Primary {
+                self.apply_mask()
+            } else {
+                self.pending_mask = None;
+                self.state.dialog = None;
+                self.push_log("mask selection canceled");
+                true
+            };
+        }
 
-                if requested_name.is_empty() {
-                    self.show_alert("name cannot be empty");
-                    return Some(true);
-                }
-                if requested_name.contains('/') {
-                    self.show_alert("name cannot contain '/'");
-                    return Some(true);
-                }
+        self.state.dialog = None;
+        true
+    }
 
-                let destination = pending.destination_dir.join(&requested_name);
-                let verb = if pending.kind == JobKind::Copy {
-                    "copy queued"
-                } else {
-                    "move queued"
-                };
-                let message = if requested_name == pending.source_name {
-                    format!("{verb}: {}", pending.source_name)
-                } else {
-                    format!("{verb}: {} -> {}", pending.source_name, requested_name)
-                };
+    fn cancel_dialog(&mut self) -> bool {
+        if self.pending_confirmation.is_some() {
+            self.pending_confirmation = None;
+            self.state.dialog = None;
+            self.push_log("operation canceled");
+            return true;
+        }
 
-                let result = self.enqueue_job(
-                    pending.kind,
-                    pending.source_path,
-                    Some(destination),
-                    message,
-                );
-                Some(match result {
-                    Ok(redraw) => redraw,
-                    Err(err) => {
-                        self.show_alert(err.to_string());
-                        true
-                    }
-                })
-            }
-            KeyCode::Backspace => {
-                if let Some(prompt) = self.state.rename_prompt.as_mut() {
-                    prompt.value.pop();
+        if self.pending_rename.is_some() {
+            self.pending_rename = None;
+            self.state.dialog = None;
+            self.push_log("copy/move canceled");
+            return true;
+        }
+
+        if self.pending_mask.is_some() {
+            self.pending_mask = None;
+            self.state.dialog = None;
+            self.push_log("mask selection canceled");
+            return true;
+        }
+
+        self.state.dialog = None;
+        true
+    }
+
+    fn apply_confirmation(&mut self) -> bool {
+        let confirmation = self.pending_confirmation.take();
+        self.state.dialog = None;
+        if let Some(confirmation) = confirmation {
+            let result = match confirmation {
+                PendingConfirmation::DeleteOne {
+                    path,
+                    name,
+                    is_directory,
+                } => {
+                    let description = if is_directory {
+                        format!("delete queued (recursive): {name}")
+                    } else {
+                        format!("delete queued: {name}")
+                    };
+                    self.enqueue_job(JobKind::Delete, path, None, description)
                 }
-                Some(true)
-            }
-            KeyCode::Char(c)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                if c != '/' && c != '\0' {
-                    if let Some(prompt) = self.state.rename_prompt.as_mut() {
-                        prompt.value.push(c);
-                    }
+                PendingConfirmation::Batch(plan) => self.execute_batch_plan(plan),
+            };
+
+            return match result {
+                Ok(redraw) => redraw,
+                Err(err) => {
+                    self.show_alert(err.to_string());
+                    true
                 }
-                Some(true)
+            };
+        }
+
+        true
+    }
+
+    fn apply_rename(&mut self) -> bool {
+        let pending = self.pending_rename.take();
+        let requested_name = self
+            .state
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.input_value.as_ref())
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        self.state.dialog = None;
+
+        let Some(pending) = pending else {
+            return true;
+        };
+
+        if requested_name.is_empty() {
+            self.show_alert("name cannot be empty");
+            return true;
+        }
+        if requested_name.contains('/') {
+            self.show_alert("name cannot contain '/'");
+            return true;
+        }
+
+        let destination = pending.destination_dir.join(&requested_name);
+        let verb = if pending.kind == JobKind::Copy {
+            "copy queued"
+        } else {
+            "move queued"
+        };
+        let message = if requested_name == pending.source_name {
+            format!("{verb}: {}", pending.source_name)
+        } else {
+            format!("{verb}: {} -> {}", pending.source_name, requested_name)
+        };
+
+        match self.enqueue_job(
+            pending.kind,
+            pending.source_path,
+            Some(destination),
+            message,
+        ) {
+            Ok(redraw) => redraw,
+            Err(err) => {
+                self.show_alert(err.to_string());
+                true
             }
-            _ => Some(false),
         }
     }
 
-    fn handle_mask_input(&mut self, key: &KeyEvent) -> Option<bool> {
-        self.pending_mask.as_ref()?;
-        self.state.mask_prompt.as_ref()?;
+    fn apply_mask(&mut self) -> bool {
+        let pending = self.pending_mask.take();
+        let mask = self
+            .state
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.input_value.clone())
+            .unwrap_or_default();
+        self.state.dialog = None;
 
-        match key.code {
-            KeyCode::Esc => {
-                self.pending_mask = None;
-                self.state.mask_prompt = None;
-                self.push_log("mask selection canceled");
-                Some(true)
-            }
-            KeyCode::Enter => {
-                let pending = self.pending_mask.take();
-                let mask = self
-                    .state
-                    .mask_prompt
-                    .as_ref()
-                    .map(|prompt| prompt.value.clone())
-                    .unwrap_or_default();
-                self.state.mask_prompt = None;
+        let Some(pending) = pending else {
+            return true;
+        };
 
-                let Some(pending) = pending else {
-                    return Some(true);
-                };
+        let changed = if pending.select {
+            self.panel_mut(pending.panel_id)
+                .select_by_mask(mask.as_str())
+        } else {
+            self.panel_mut(pending.panel_id)
+                .deselect_by_mask(mask.as_str())
+        };
+        self.update_selection_status();
+        self.push_log(if pending.select {
+            format!("selected {changed} by mask")
+        } else {
+            format!("deselected {changed} by mask")
+        });
+        true
+    }
 
-                let changed = if pending.select {
-                    self.panel_mut(pending.panel_id)
-                        .select_by_mask(mask.as_str())
-                } else {
-                    self.panel_mut(pending.panel_id)
-                        .deselect_by_mask(mask.as_str())
-                };
-                self.update_selection_status();
-                self.push_log(if pending.select {
-                    format!("selected {changed} by mask")
-                } else {
-                    format!("deselected {changed} by mask")
-                });
-                Some(true)
-            }
-            KeyCode::Backspace => {
-                if let Some(prompt) = self.state.mask_prompt.as_mut() {
-                    prompt.value.pop();
-                }
-                Some(true)
-            }
-            KeyCode::Char(c)
-                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
-            {
-                if c != '\0' {
-                    if let Some(prompt) = self.state.mask_prompt.as_mut() {
-                        prompt.value.push(c);
-                    }
-                }
-                Some(true)
-            }
-            _ => Some(false),
+    fn edit_dialog_input_backspace(&mut self) -> bool {
+        if self.pending_rename.is_none() && self.pending_mask.is_none() {
+            return false;
         }
+        if let Some(dialog) = self.state.dialog.as_mut() {
+            if let Some(value) = dialog.input_value.as_mut() {
+                value.pop();
+                return true;
+            }
+        }
+        false
+    }
+
+    fn edit_dialog_input_char(&mut self, c: char) -> bool {
+        if self.pending_rename.is_none() && self.pending_mask.is_none() {
+            return false;
+        }
+        if c == '\0' {
+            return false;
+        }
+
+        if self.pending_rename.is_some() && c == '/' {
+            return true;
+        }
+
+        if let Some(dialog) = self.state.dialog.as_mut() {
+            if let Some(value) = dialog.input_value.as_mut() {
+                value.push(c);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn find_dialog_button_by_accelerator(&self, accelerator: char) -> Option<DialogButtonRole> {
+        let normalized = accelerator.to_ascii_lowercase();
+        self.state.dialog.as_ref().and_then(|dialog| {
+            dialog
+                .buttons
+                .iter()
+                .find(|button| {
+                    button.accelerator.map(|c| c.to_ascii_lowercase()) == Some(normalized)
+                })
+                .map(|button| button.role)
+        })
     }
 
     fn handle_search_input(&mut self, key: &KeyEvent) -> Option<bool> {
@@ -1047,7 +1119,10 @@ impl App {
 
     fn show_alert(&mut self, message: impl Into<String>) {
         let message = message.into();
-        self.state.alert_prompt = Some(message.clone());
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.state.dialog = Some(alert_dialog(message.clone()));
         self.push_log(message);
     }
 }
@@ -1101,13 +1176,13 @@ fn batch_summary(
 ) -> String {
     match kind {
         JobKind::Copy => format!(
-            "Copy {} item(s), {} to {}? [y/N]",
+            "Copy {} item(s), {} to {}?",
             count,
             format_bytes(total_bytes),
             destination_dir.display()
         ),
         JobKind::Move => format!(
-            "Move {} item(s), {} to {}? [y/N]",
+            "Move {} item(s), {} to {}?",
             count,
             format_bytes(total_bytes),
             destination_dir.display()
@@ -1115,14 +1190,14 @@ fn batch_summary(
         JobKind::Delete => {
             if dir_count > 0 {
                 format!(
-                    "Delete {} item(s), {} (includes {} dir) permanently? [y/N]",
+                    "Delete {} item(s), {} (includes {} dir) permanently?",
                     count,
                     format_bytes(total_bytes),
                     dir_count
                 )
             } else {
                 format!(
-                    "Delete {} item(s), {} permanently? [y/N]",
+                    "Delete {} item(s), {} permanently?",
                     count,
                     format_bytes(total_bytes)
                 )
@@ -1144,5 +1219,74 @@ fn format_bytes(bytes: u64) -> String {
         format!("{bytes}{}", UNITS[idx])
     } else {
         format!("{size:.1}{}", UNITS[idx])
+    }
+}
+
+fn accelerator_from_key(key: &KeyEvent) -> Option<char> {
+    if !key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    Some(c.to_ascii_lowercase())
+}
+
+fn input_dialog(title: &str, body: &str, value: String, tone: DialogTone) -> DialogState {
+    DialogState {
+        title: title.to_string(),
+        body: body.to_string(),
+        input_value: Some(value),
+        buttons: vec![
+            DialogButton {
+                label: "Apply".to_string(),
+                accelerator: Some('a'),
+                role: DialogButtonRole::Primary,
+            },
+            DialogButton {
+                label: "Cancel".to_string(),
+                accelerator: Some('c'),
+                role: DialogButtonRole::Secondary,
+            },
+        ],
+        focused_button: 0,
+        tone,
+    }
+}
+
+fn confirm_dialog(body: String) -> DialogState {
+    DialogState {
+        title: "Confirm".to_string(),
+        body,
+        input_value: None,
+        buttons: vec![
+            DialogButton {
+                label: "Yes".to_string(),
+                accelerator: Some('y'),
+                role: DialogButtonRole::Primary,
+            },
+            DialogButton {
+                label: "No".to_string(),
+                accelerator: Some('n'),
+                role: DialogButtonRole::Secondary,
+            },
+        ],
+        focused_button: 1,
+        tone: DialogTone::Warning,
+    }
+}
+
+fn alert_dialog(body: String) -> DialogState {
+    DialogState {
+        title: "Error".to_string(),
+        body,
+        input_value: None,
+        buttons: vec![DialogButton {
+            label: "OK".to_string(),
+            accelerator: Some('o'),
+            role: DialogButtonRole::Primary,
+        }],
+        focused_button: 0,
+        tone: DialogTone::Danger,
     }
 }

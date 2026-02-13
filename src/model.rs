@@ -265,10 +265,7 @@ pub struct AppState {
     pub right_panel: PanelState,
     pub status_line: String,
     pub activity_log: Vec<String>,
-    pub confirm_prompt: Option<String>,
-    pub alert_prompt: Option<String>,
-    pub rename_prompt: Option<RenamePrompt>,
-    pub mask_prompt: Option<RenamePrompt>,
+    pub dialog: Option<DialogState>,
     pub jobs: Vec<Job>,
     pub terminal_size: TerminalSize,
 }
@@ -281,10 +278,7 @@ impl AppState {
             right_panel: PanelState::new(cwd),
             status_line: "Ready".to_string(),
             activity_log: Vec::new(),
-            confirm_prompt: None,
-            alert_prompt: None,
-            rename_prompt: None,
-            mask_prompt: None,
+            dialog: None,
             jobs: Vec::new(),
             terminal_size: TerminalSize {
                 width: 0,
@@ -295,9 +289,59 @@ impl AppState {
 }
 
 #[derive(Debug, Clone)]
-pub struct RenamePrompt {
+pub struct DialogState {
     pub title: String,
-    pub value: String,
+    pub body: String,
+    pub input_value: Option<String>,
+    pub buttons: Vec<DialogButton>,
+    pub focused_button: usize,
+    pub tone: DialogTone,
+}
+
+impl DialogState {
+    pub fn focus_next(&mut self) {
+        if self.buttons.is_empty() {
+            self.focused_button = 0;
+            return;
+        }
+        self.focused_button = (self.focused_button + 1) % self.buttons.len();
+    }
+
+    pub fn focus_prev(&mut self) {
+        if self.buttons.is_empty() {
+            self.focused_button = 0;
+            return;
+        }
+        self.focused_button = if self.focused_button == 0 {
+            self.buttons.len().saturating_sub(1)
+        } else {
+            self.focused_button.saturating_sub(1)
+        };
+    }
+
+    pub fn focused_button(&self) -> Option<&DialogButton> {
+        self.buttons.get(self.focused_button)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DialogButton {
+    pub label: String,
+    pub accelerator: Option<char>,
+    pub role: DialogButtonRole,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogButtonRole {
+    Primary,
+    Secondary,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DialogTone {
+    Default,
+    Warning,
+    Danger,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

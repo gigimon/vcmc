@@ -5,7 +5,10 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
-use crate::model::{AppState, FsEntry, FsEntryType, JobStatus, PanelId, PanelState, SortMode};
+use crate::model::{
+    AppState, DialogButton, DialogButtonRole, DialogState, DialogTone, FsEntry, FsEntryType,
+    JobStatus, PanelId, PanelState, SortMode,
+};
 
 pub fn render(frame: &mut Frame, state: &AppState) {
     let chunks = Layout::default()
@@ -45,17 +48,8 @@ pub fn render(frame: &mut Frame, state: &AppState) {
     render_log(frame, chunks[3], state);
     render_help(frame, chunks[4]);
 
-    if let Some(prompt) = &state.rename_prompt {
-        render_rename_dialog(frame, prompt.title.as_str(), prompt.value.as_str());
-    }
-    if let Some(prompt) = &state.mask_prompt {
-        render_mask_dialog(frame, prompt.title.as_str(), prompt.value.as_str());
-    }
-    if let Some(prompt) = &state.confirm_prompt {
-        render_confirm_dialog(frame, prompt);
-    }
-    if let Some(prompt) = &state.alert_prompt {
-        render_alert_dialog(frame, prompt);
+    if let Some(dialog) = &state.dialog {
+        render_dialog(frame, dialog);
     }
 }
 
@@ -276,57 +270,103 @@ fn render_log(frame: &mut Frame, area: Rect, state: &AppState) {
 
 fn render_help(frame: &mut Frame, area: Rect) {
     let help = Paragraph::new(
-        "Tab switch  Arrows move  Shift+Arrows range  Space/Ins mark  +/-/* mask ops  / search  F5/F6 rename-op  F7 mkdir  F8 delete  q quit",
+        "Tab switch  Arrows move  Shift+Arrows range  Space/Ins mark  +/-/* mask ops  / search  F5/F6 rename-op  F7 mkdir  F8 delete  Dialog: Tab/Shift+Tab, Left/Right, Enter, Esc, Alt+hotkey",
     );
     frame.render_widget(help, area);
 }
 
-fn render_rename_dialog(frame: &mut Frame, title: &str, value: &str) {
-    let area = centered_rect(75, 6, frame.area());
+fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
+    let area = centered_rect(
+        78,
+        if dialog.input_value.is_some() { 9 } else { 7 },
+        frame.area(),
+    );
     frame.render_widget(Clear, area);
+
+    let border_color = match dialog.tone {
+        DialogTone::Default => Color::Cyan,
+        DialogTone::Warning => Color::Yellow,
+        DialogTone::Danger => Color::Red,
+    };
+
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(Color::Cyan));
-    let content = Paragraph::new(format!("{value}\n\nEnter apply, Esc cancel")).block(block);
-    frame.render_widget(content, area);
+        .title(dialog.title.as_str())
+        .border_style(
+            Style::default()
+                .fg(border_color)
+                .add_modifier(Modifier::BOLD),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+
+    let constraints = if dialog.input_value.is_some() {
+        vec![
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ]
+    } else {
+        vec![Constraint::Min(1), Constraint::Length(1)]
+    };
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(inner);
+
+    let body = Paragraph::new(dialog.body.as_str()).alignment(Alignment::Center);
+    frame.render_widget(body, chunks[0]);
+
+    let button_row_idx = if let Some(value) = dialog.input_value.as_ref() {
+        let input = Paragraph::new(Line::styled(
+            format!("> {value}"),
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::UNDERLINED),
+        ));
+        frame.render_widget(input, chunks[1]);
+        2
+    } else {
+        1
+    };
+
+    let buttons = Paragraph::new(render_button_row(dialog)).alignment(Alignment::Center);
+    frame.render_widget(buttons, chunks[button_row_idx]);
 }
 
-fn render_mask_dialog(frame: &mut Frame, title: &str, value: &str) {
-    let area = centered_rect(70, 6, frame.area());
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title(title)
-        .border_style(Style::default().fg(Color::Yellow));
-    let content = Paragraph::new(format!("{value}\n\nWildcard: * and ?")).block(block);
-    frame.render_widget(content, area);
+fn render_button_row(dialog: &DialogState) -> Line<'static> {
+    let mut spans = Vec::new();
+
+    for (idx, button) in dialog.buttons.iter().enumerate() {
+        if idx > 0 {
+            spans.push(Span::raw(" "));
+        }
+
+        let is_focused = idx == dialog.focused_button;
+        let label = button_label(button);
+        let style = if is_focused {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if button.role == DialogButtonRole::Primary {
+            Style::default()
+                .fg(Color::White)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        spans.push(Span::styled(format!("[ {label} ]"), style));
+    }
+
+    Line::from(spans)
 }
 
-fn render_confirm_dialog(frame: &mut Frame, prompt: &str) {
-    let area = centered_rect(70, 5, frame.area());
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Confirm")
-        .border_style(Style::default().fg(Color::Yellow));
-    let content = Paragraph::new(prompt)
-        .alignment(Alignment::Center)
-        .block(block);
-    frame.render_widget(content, area);
-}
-
-fn render_alert_dialog(frame: &mut Frame, prompt: &str) {
-    let area = centered_rect(80, 6, frame.area());
-    frame.render_widget(Clear, area);
-    let block = Block::default()
-        .borders(Borders::ALL)
-        .title("Error")
-        .border_style(Style::default().fg(Color::Red));
-    let content = Paragraph::new(format!("{prompt}\n\nPress any key"))
-        .alignment(Alignment::Center)
-        .block(block);
-    frame.render_widget(content, area);
+fn button_label(button: &DialogButton) -> String {
+    match button.accelerator {
+        Some(accel) => format!("Alt+{} {}", accel.to_ascii_uppercase(), button.label),
+        None => button.label.clone(),
+    }
 }
 
 fn type_style(entry: &FsEntry) -> Style {
