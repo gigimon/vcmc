@@ -102,7 +102,13 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
     }
 
     let layout = fixed_table_layout(total_width);
-    let rows_capacity = capacity.saturating_sub(1);
+    let (selected_count, selected_bytes) = panel.selection_summary();
+    let has_selection_badge = panel_active && selected_count > 0;
+    let rows_capacity = if has_selection_badge {
+        capacity.saturating_sub(2)
+    } else {
+        capacity.saturating_sub(1)
+    };
     let selected = panel
         .selected_index
         .min(panel.entries.len().saturating_sub(1));
@@ -210,8 +216,16 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
         lines.push(Line::from(spans));
     }
 
-    while lines.len() < capacity {
+    while lines.len() < rows_capacity + 1 {
         lines.push(render_table_empty_line(layout));
+    }
+
+    if has_selection_badge {
+        lines.push(render_selection_line(
+            layout,
+            selected_count,
+            selected_bytes,
+        ));
     }
 
     lines
@@ -251,33 +265,6 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let footer = Paragraph::new(Line::from(spans));
     frame.render_widget(footer, area);
-
-    let (selected_count, selected_bytes) = active_panel.selection_summary();
-    if selected_count == 0 {
-        return;
-    }
-
-    let halves = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(area);
-    let (target_area, alignment) = match state.active_panel {
-        PanelId::Left => (halves[0], Alignment::Left),
-        PanelId::Right => (halves[1], Alignment::Right),
-    };
-
-    let selection_badge = Paragraph::new(format!(
-        " sel:{selected_count} ({}) ",
-        human_size(selected_bytes)
-    ))
-    .alignment(alignment)
-    .style(
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD),
-    );
-    frame.render_widget(selection_badge, target_area);
 }
 
 fn footer_mode(state: &AppState, panel: &PanelState) -> FooterMode {
@@ -651,6 +638,53 @@ fn render_table_empty_line(layout: TableLayout) -> Line<'static> {
     };
 
     Line::styled(text, Style::default().fg(Color::DarkGray))
+}
+
+fn render_selection_line(
+    layout: TableLayout,
+    selected_count: usize,
+    selected_bytes: u64,
+) -> Line<'static> {
+    let badge = format!("sel:{selected_count} ({})", human_size(selected_bytes));
+
+    let text = match layout {
+        TableLayout::Full {
+            name_width,
+            size_width,
+            modified_width,
+        } => format!(
+            "{:<name_width$}{COL_SEP}{:>size_width$}{COL_SEP}{:>modified_width$}",
+            truncate_name(badge.as_str(), name_width),
+            "",
+            "",
+            name_width = name_width,
+            size_width = size_width,
+            modified_width = modified_width
+        ),
+        TableLayout::Compact {
+            name_width,
+            size_width,
+        } => format!(
+            "{:<name_width$}{COL_SEP}{:>size_width$}",
+            truncate_name(badge.as_str(), name_width),
+            "",
+            name_width = name_width,
+            size_width = size_width
+        ),
+        TableLayout::Minimal { name_width } => format!(
+            "{:<name_width$}",
+            truncate_name(badge.as_str(), name_width),
+            name_width = name_width
+        ),
+    };
+
+    Line::styled(
+        text,
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 fn entry_name(entry: &FsEntry) -> String {
