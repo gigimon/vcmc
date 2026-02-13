@@ -5,7 +5,7 @@ use anyhow::Result;
 use crossterm::cursor::{Hide, Show};
 use crossterm::execute;
 use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+    Clear, ClearType, EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -53,6 +53,20 @@ pub fn install_panic_hook() {
         let _ = restore_stdio_terminal();
         previous_hook(panic_info);
     }));
+}
+
+pub fn suspend_for_external_process() -> Result<()> {
+    disable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, Show, LeaveAlternateScreen, Clear(ClearType::All))?;
+    Ok(())
+}
+
+pub fn resume_after_external_process() -> Result<()> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen, Hide, Clear(ClearType::All))?;
+    Ok(())
 }
 
 fn restore_stdio_terminal() -> Result<()> {

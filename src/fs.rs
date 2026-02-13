@@ -3,6 +3,8 @@
 use std::cmp::Ordering;
 use std::env;
 use std::fs;
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -47,6 +49,7 @@ impl FsAdapter {
                 entry_type,
                 size_bytes,
                 modified_at,
+                is_executable: is_executable(&metadata),
                 is_hidden,
                 is_virtual: false,
             });
@@ -75,6 +78,7 @@ impl FsAdapter {
             entry_type: map_entry_type(&metadata),
             size_bytes: metadata.len(),
             modified_at: metadata.modified().ok(),
+            is_executable: is_executable(&metadata),
             is_hidden,
             is_virtual: false,
         })
@@ -266,6 +270,7 @@ fn parent_link(parent: PathBuf) -> FsEntry {
         entry_type: FsEntryType::Directory,
         size_bytes: 0,
         modified_at: None,
+        is_executable: false,
         is_hidden: false,
         is_virtual: true,
     }
@@ -281,6 +286,18 @@ fn map_entry_type(metadata: &fs::Metadata) -> FsEntryType {
         FsEntryType::Symlink
     } else {
         FsEntryType::Other
+    }
+}
+
+fn is_executable(metadata: &fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        metadata.permissions().mode() & 0o111 != 0
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = metadata;
+        false
     }
 }
 

@@ -12,6 +12,31 @@ pub enum PanelId {
     Right,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SftpAuth {
+    Agent,
+    Password(String),
+    KeyFile {
+        path: PathBuf,
+        passphrase: Option<String>,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SftpConnectionInfo {
+    pub host: String,
+    pub user: String,
+    pub port: u16,
+    pub root_path: PathBuf,
+    pub auth: SftpAuth,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BackendSpec {
+    Local,
+    Sftp(SftpConnectionInfo),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SortMode {
     Name,
@@ -44,6 +69,7 @@ pub struct FsEntry {
     pub entry_type: FsEntryType,
     pub size_bytes: u64,
     pub modified_at: Option<SystemTime>,
+    pub is_executable: bool,
     pub is_hidden: bool,
     pub is_virtual: bool,
 }
@@ -258,14 +284,34 @@ pub struct TerminalSize {
     pub height: u16,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenMode {
+    Normal,
+    Viewer,
+}
+
+#[derive(Debug, Clone)]
+pub struct ViewerState {
+    pub path: PathBuf,
+    pub title: String,
+    pub lines: Vec<String>,
+    pub scroll_offset: usize,
+    pub is_binary_like: bool,
+    pub byte_size: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct AppState {
+    pub screen_mode: ScreenMode,
     pub active_panel: PanelId,
     pub left_panel: PanelState,
     pub right_panel: PanelState,
     pub status_line: String,
     pub activity_log: Vec<String>,
     pub dialog: Option<DialogState>,
+    pub viewer: Option<ViewerState>,
+    pub batch_progress: Option<BatchProgressState>,
+    pub command_line: CommandLineState,
     pub jobs: Vec<Job>,
     pub terminal_size: TerminalSize,
 }
@@ -273,12 +319,16 @@ pub struct AppState {
 impl AppState {
     pub fn new(cwd: PathBuf) -> Self {
         Self {
+            screen_mode: ScreenMode::Normal,
             active_panel: PanelId::Left,
             left_panel: PanelState::new(cwd.clone()),
             right_panel: PanelState::new(cwd),
             status_line: "Ready".to_string(),
             activity_log: Vec::new(),
             dialog: None,
+            viewer: None,
+            batch_progress: None,
+            command_line: CommandLineState::default(),
             jobs: Vec::new(),
             terminal_size: TerminalSize {
                 width: 0,
@@ -288,11 +338,18 @@ impl AppState {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct CommandLineState {
+    pub input: String,
+    pub active: bool,
+}
+
 #[derive(Debug, Clone)]
 pub struct DialogState {
     pub title: String,
     pub body: String,
     pub input_value: Option<String>,
+    pub mask_input: bool,
     pub buttons: Vec<DialogButton>,
     pub focused_button: usize,
     pub tone: DialogTone,
@@ -348,8 +405,21 @@ pub enum DialogTone {
 pub enum Command {
     Quit,
     SwitchPanel,
+    ConnectSftp,
+    OpenShell,
     MoveSelectionUp,
     MoveSelectionDown,
+    MoveSelectionTop,
+    MoveSelectionBottom,
+    OpenViewer,
+    CloseViewer,
+    ViewerScrollUp,
+    ViewerScrollDown,
+    ViewerPageUp,
+    ViewerPageDown,
+    ViewerTop,
+    ViewerBottom,
+    OpenEditor,
     OpenSelected,
     GoToParent,
     GoHome,
@@ -400,6 +470,9 @@ pub struct Job {
     pub status: JobStatus,
     pub source: PathBuf,
     pub destination: Option<PathBuf>,
+    pub current_item: Option<String>,
+    pub batch_completed: Option<usize>,
+    pub batch_total: Option<usize>,
     pub message: Option<String>,
 }
 
@@ -408,6 +481,8 @@ pub struct JobRequest {
     pub id: u64,
     pub batch_id: Option<u64>,
     pub kind: JobKind,
+    pub source_backend: BackendSpec,
+    pub destination_backend: Option<BackendSpec>,
     pub source: PathBuf,
     pub destination: Option<PathBuf>,
 }
@@ -420,6 +495,9 @@ pub struct JobUpdate {
     pub status: JobStatus,
     pub source: PathBuf,
     pub destination: Option<PathBuf>,
+    pub current_item: Option<String>,
+    pub batch_completed: Option<usize>,
+    pub batch_total: Option<usize>,
     pub message: Option<String>,
 }
 
@@ -432,9 +510,22 @@ impl JobUpdate {
             status: self.status,
             source: self.source,
             destination: self.destination,
+            current_item: self.current_item,
+            batch_completed: self.batch_completed,
+            batch_total: self.batch_total,
             message: self.message,
         }
     }
+}
+
+#[derive(Debug, Clone)]
+pub struct BatchProgressState {
+    pub batch_id: u64,
+    pub operation: JobKind,
+    pub current_file: String,
+    pub completed: usize,
+    pub total: usize,
+    pub failed: usize,
 }
 
 fn normalize_mask(mask: &str) -> String {

@@ -1,28 +1,45 @@
 use std::collections::{HashMap, HashSet};
+use std::env;
+use std::net::TcpStream;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
+use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use crossbeam_channel::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use ssh2::Session;
 
-use crate::fs::FsAdapter;
+use crate::backend::{FsBackend, backend_from_spec};
 use crate::jobs::WorkerPool;
 use crate::model::{
-    AppState, Command, DialogButton, DialogButtonRole, DialogState, DialogTone, Event, FsEntry,
-    FsEntryType, Job, JobKind, JobRequest, JobStatus, JobUpdate, PanelId, TerminalSize,
+    AppState, BackendSpec, BatchProgressState, Command, DialogButton, DialogButtonRole,
+    DialogState, DialogTone, Event, FsEntry, FsEntryType, Job, JobKind, JobRequest, JobStatus,
+    JobUpdate, PanelId, ScreenMode, SftpAuth, SftpConnectionInfo, TerminalSize,
 };
+use crate::theme::{DirColorsTheme, load_theme_from_environment};
+use crate::viewer::load_viewer_state;
+use crate::{runtime, terminal};
 
 pub struct App {
     state: AppState,
     running: bool,
-    fs: FsAdapter,
     workers: WorkerPool,
+    left_backend: Arc<dyn FsBackend>,
+    right_backend: Arc<dyn FsBackend>,
+    left_backend_spec: BackendSpec,
+    right_backend_spec: BackendSpec,
+    theme: DirColorsTheme,
     next_job_id: u64,
     next_batch_id: u64,
     pending_confirmation: Option<PendingConfirmation>,
     pending_rename: Option<PendingRename>,
     pending_mask: Option<PendingMask>,
+    pending_sftp_connect: Option<PendingSftpConnect>,
     batch_progress: HashMap<u64, BatchProgress>,
+    last_left_local_cwd: PathBuf,
+    last_right_local_cwd: PathBuf,
     input_mode: Option<InputMode>,
 }
 
@@ -47,6 +64,35 @@ struct PendingMask {
     select: bool,
 }
 
+struct PendingSftpConnect {
+    panel_id: PanelId,
+    stage: SftpConnectStage,
+    draft: SftpConnectDraft,
+}
+
+#[derive(Clone)]
+struct SftpConnectDraft {
+    host: String,
+    port: u16,
+    root_path: PathBuf,
+    user: Option<String>,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SftpConnectStage {
+    Address,
+    Login,
+    Password,
+    KeyPath,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SftpAuthHint {
+    PasswordOnly,
+    KeyOnly,
+    Either,
+}
+
 #[derive(Clone)]
 struct BatchOpItem {
     source: PathBuf,
@@ -66,6 +112,7 @@ struct BatchProgress {
     total: usize,
     completed: usize,
     failed: usize,
+    current_file: String,
 }
 
 enum InputMode {
@@ -74,20 +121,29 @@ enum InputMode {
 
 impl App {
     pub fn bootstrap(cwd: PathBuf, event_tx: Sender<Event>) -> Result<Self> {
-        let fs = FsAdapter::default();
-        let normalized_cwd = fs.normalize_existing_path("bootstrap", &cwd)?;
+        let local_spec = BackendSpec::Local;
+        let local_backend = backend_from_spec(&local_spec);
+        let normalized_cwd = local_backend.normalize_existing_path("bootstrap", &cwd)?;
         let workers = WorkerPool::new(2, event_tx);
+        let theme = load_theme_from_environment();
         let mut app = Self {
-            state: AppState::new(normalized_cwd),
+            state: AppState::new(normalized_cwd.clone()),
             running: true,
-            fs,
             workers,
+            left_backend: local_backend.clone(),
+            right_backend: local_backend,
+            left_backend_spec: local_spec.clone(),
+            right_backend_spec: local_spec,
+            theme,
             next_job_id: 1,
             next_batch_id: 1,
             pending_confirmation: None,
             pending_rename: None,
             pending_mask: None,
+            pending_sftp_connect: None,
             batch_progress: HashMap::new(),
+            last_left_local_cwd: normalized_cwd.clone(),
+            last_right_local_cwd: normalized_cwd,
             input_mode: None,
         };
 
@@ -98,6 +154,10 @@ impl App {
 
     pub fn state(&self) -> &AppState {
         &self.state
+    }
+
+    pub fn theme(&self) -> &DirColorsTheme {
+        &self.theme
     }
 
     pub fn is_running(&self) -> bool {
@@ -111,7 +171,18 @@ impl App {
                     return redraw;
                 }
 
+                if self.state.screen_mode == ScreenMode::Viewer {
+                    if let Some(cmd) = map_viewer_key_to_command(&key) {
+                        return self.apply_command(cmd);
+                    }
+                    return false;
+                }
+
                 if let Some(redraw) = self.handle_search_input(&key) {
+                    return redraw;
+                }
+
+                if let Some(redraw) = self.handle_command_line_input(&key) {
                     return redraw;
                 }
 
@@ -145,9 +216,12 @@ impl App {
                 self.pending_confirmation = None;
                 self.pending_rename = None;
                 self.pending_mask = None;
+                self.pending_sftp_connect = None;
                 self.state.dialog = None;
                 Ok(true)
             }
+            Command::ConnectSftp => self.handle_sftp_action(),
+            Command::OpenShell => self.open_shell_mode(),
             Command::MoveSelectionUp => {
                 self.active_panel_mut().move_selection_up();
                 self.active_panel_mut().clear_selection_anchor();
@@ -158,10 +232,35 @@ impl App {
                 self.active_panel_mut().clear_selection_anchor();
                 Ok(true)
             }
+            Command::MoveSelectionTop => {
+                self.active_panel_mut().selected_index = 0;
+                self.active_panel_mut().clear_selection_anchor();
+                Ok(true)
+            }
+            Command::MoveSelectionBottom => {
+                let last_index = self.active_panel().entries.len().saturating_sub(1);
+                if self.active_panel().entries.is_empty() {
+                    self.active_panel_mut().selected_index = 0;
+                } else {
+                    self.active_panel_mut().selected_index = last_index;
+                }
+                self.active_panel_mut().clear_selection_anchor();
+                Ok(true)
+            }
+            Command::OpenViewer => self.open_viewer(),
+            Command::CloseViewer => self.close_viewer(),
+            Command::ViewerScrollUp => self.viewer_scroll_up(),
+            Command::ViewerScrollDown => self.viewer_scroll_down(),
+            Command::ViewerPageUp => self.viewer_page_up(),
+            Command::ViewerPageDown => self.viewer_page_down(),
+            Command::ViewerTop => self.viewer_top(),
+            Command::ViewerBottom => self.viewer_bottom(),
+            Command::OpenEditor => self.open_editor(),
             Command::SelectRangeUp => self.select_range_up(),
             Command::SelectRangeDown => self.select_range_down(),
             Command::Refresh => self
-                .reload_panel(PanelId::Left, true)
+                .reload_theme()
+                .and_then(|_| self.reload_panel(PanelId::Left, true))
                 .and_then(|_| self.reload_panel(PanelId::Right, false)),
             Command::OpenSelected => self.open_selected_directory(),
             Command::GoToParent => self.go_to_parent(),
@@ -190,6 +289,38 @@ impl App {
     fn handle_job_update(&mut self, update: JobUpdate) -> bool {
         if let Some(batch_id) = update.batch_id {
             return self.handle_batch_job_update(batch_id, update);
+        }
+
+        if self.batch_progress.is_empty() {
+            match update.status {
+                JobStatus::Running => {
+                    let total = update.batch_total.unwrap_or(1).max(1);
+                    let completed = update.batch_completed.unwrap_or(0).min(total);
+                    let current_file = update
+                        .current_item
+                        .clone()
+                        .unwrap_or_else(|| source_item_label(&update.source));
+                    self.state.batch_progress = Some(BatchProgressState {
+                        batch_id: update.id,
+                        operation: update.kind,
+                        current_file,
+                        completed,
+                        total,
+                        failed: 0,
+                    });
+                }
+                JobStatus::Done | JobStatus::Failed => {
+                    if self
+                        .state
+                        .batch_progress
+                        .as_ref()
+                        .is_some_and(|progress| progress.batch_id == update.id)
+                    {
+                        self.state.batch_progress = None;
+                    }
+                }
+                JobStatus::Queued => {}
+            }
         }
 
         let needs_reload = update.status == JobStatus::Done;
@@ -226,19 +357,27 @@ impl App {
         true
     }
 
-    fn handle_batch_job_update(&mut self, batch_id: u64, update: JobUpdate) -> bool {
+    fn handle_batch_job_update(&mut self, batch_id: u64, mut update: JobUpdate) -> bool {
         let has_failed = update.status == JobStatus::Failed;
         let is_terminal = matches!(update.status, JobStatus::Done | JobStatus::Failed);
+        let has_running = update.status == JobStatus::Running;
         let message = update
             .message
             .clone()
             .unwrap_or_else(|| "batch job updated".to_string());
-        self.upsert_job(update);
 
         let mut should_log_failure = false;
         let mut finished: Option<(JobKind, usize, usize)> = None;
 
         if let Some(progress) = self.batch_progress.get_mut(&batch_id) {
+            let item_label = update
+                .current_item
+                .clone()
+                .unwrap_or_else(|| source_item_label(&update.source));
+            if has_running || is_terminal {
+                progress.current_file = item_label.clone();
+            }
+
             if is_terminal {
                 progress.completed = progress.completed.saturating_add(1);
                 if has_failed {
@@ -250,10 +389,24 @@ impl App {
                 should_log_failure = true;
             }
 
+            update.current_item = Some(progress.current_file.clone());
+            update.batch_completed = Some(progress.completed);
+            update.batch_total = Some(progress.total);
+            self.state.batch_progress = Some(BatchProgressState {
+                batch_id,
+                operation: progress.kind,
+                current_file: progress.current_file.clone(),
+                completed: progress.completed,
+                total: progress.total,
+                failed: progress.failed,
+            });
+
             if progress.completed >= progress.total {
                 finished = Some((progress.kind, progress.total, progress.failed));
             }
         }
+
+        self.upsert_job(update);
 
         if should_log_failure {
             self.push_log(message);
@@ -261,6 +414,7 @@ impl App {
 
         if let Some((kind, total, failed)) = finished {
             self.batch_progress.remove(&batch_id);
+            self.sync_visible_batch_progress(None);
             if failed > 0 {
                 self.show_alert(format!(
                     "batch {} finished: total {} / failed {}",
@@ -292,6 +446,9 @@ impl App {
             job.status = update.status;
             job.message = update.message.clone();
             job.batch_id = update.batch_id;
+            job.current_item = update.current_item.clone();
+            job.batch_completed = update.batch_completed;
+            job.batch_total = update.batch_total;
             if update.destination.is_some() {
                 job.destination = update.destination.clone();
             }
@@ -321,12 +478,90 @@ impl App {
         }
     }
 
+    fn panel(&self, id: PanelId) -> &crate::model::PanelState {
+        match id {
+            PanelId::Left => &self.state.left_panel,
+            PanelId::Right => &self.state.right_panel,
+        }
+    }
+
+    fn backend(&self, id: PanelId) -> &dyn FsBackend {
+        match id {
+            PanelId::Left => self.left_backend.as_ref(),
+            PanelId::Right => self.right_backend.as_ref(),
+        }
+    }
+
+    fn active_backend(&self) -> &dyn FsBackend {
+        self.backend(self.state.active_panel)
+    }
+
+    fn inactive_backend(&self) -> &dyn FsBackend {
+        match self.state.active_panel {
+            PanelId::Left => self.right_backend.as_ref(),
+            PanelId::Right => self.left_backend.as_ref(),
+        }
+    }
+
+    fn backend_spec(&self, id: PanelId) -> &BackendSpec {
+        match id {
+            PanelId::Left => &self.left_backend_spec,
+            PanelId::Right => &self.right_backend_spec,
+        }
+    }
+
+    fn active_backend_spec(&self) -> &BackendSpec {
+        self.backend_spec(self.state.active_panel)
+    }
+
+    fn inactive_backend_spec(&self) -> &BackendSpec {
+        match self.state.active_panel {
+            PanelId::Left => &self.right_backend_spec,
+            PanelId::Right => &self.left_backend_spec,
+        }
+    }
+
+    fn set_panel_backend(&mut self, id: PanelId, spec: BackendSpec) {
+        let backend = backend_from_spec(&spec);
+        match id {
+            PanelId::Left => {
+                self.left_backend = backend;
+                self.left_backend_spec = spec;
+            }
+            PanelId::Right => {
+                self.right_backend = backend;
+                self.right_backend_spec = spec;
+            }
+        }
+    }
+
+    fn set_last_local_cwd(&mut self, id: PanelId, cwd: PathBuf) {
+        match id {
+            PanelId::Left => self.last_left_local_cwd = cwd,
+            PanelId::Right => self.last_right_local_cwd = cwd,
+        }
+    }
+
+    fn last_local_cwd(&self, id: PanelId) -> PathBuf {
+        match id {
+            PanelId::Left => self.last_left_local_cwd.clone(),
+            PanelId::Right => self.last_right_local_cwd.clone(),
+        }
+    }
+
+    fn path_exists_on_backend(&self, backend: &dyn FsBackend, path: &Path) -> bool {
+        backend.stat_entry(path).is_ok()
+    }
+
     fn reload_panel(&mut self, panel_id: PanelId, update_status: bool) -> Result<bool> {
         let (cwd, sort_mode, show_hidden) = {
             let panel = self.panel_mut(panel_id);
             (panel.cwd.clone(), panel.sort_mode, panel.show_hidden)
         };
-        match self.fs.list_dir(&cwd, sort_mode, show_hidden) {
+        match self
+            .backend(panel_id)
+            .list_dir(&cwd, sort_mode, show_hidden)
+        {
             Ok(entries) => {
                 let panel = self.panel_mut(panel_id);
                 panel.set_entries(entries);
@@ -347,6 +582,11 @@ impl App {
         }
     }
 
+    fn reload_theme(&mut self) -> Result<bool> {
+        self.theme = load_theme_from_environment();
+        Ok(true)
+    }
+
     fn open_selected_directory(&mut self) -> Result<bool> {
         let selected = self.active_panel().selected_entry().cloned();
         let Some(entry) = selected else {
@@ -358,7 +598,9 @@ impl App {
             return Ok(true);
         }
 
-        let next_path = self.fs.normalize_existing_path("open", &entry.path)?;
+        let next_path = self
+            .active_backend()
+            .normalize_existing_path("open", &entry.path)?;
         let panel = self.active_panel_mut();
         panel.cwd = next_path;
         panel.selected_index = 0;
@@ -372,7 +614,9 @@ impl App {
             return Ok(false);
         };
 
-        let normalized = self.fs.normalize_existing_path("parent", parent)?;
+        let normalized = self
+            .active_backend()
+            .normalize_existing_path("parent", parent)?;
         let panel = self.active_panel_mut();
         panel.cwd = normalized;
         panel.selected_index = 0;
@@ -381,15 +625,185 @@ impl App {
     }
 
     fn go_to_home(&mut self) -> Result<bool> {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!("HOME environment variable is not set"))?;
-        let normalized = self.fs.normalize_existing_path("home", &home)?;
+        let normalized = match self.active_backend_spec() {
+            BackendSpec::Local => {
+                let home = env::var_os("HOME")
+                    .map(PathBuf::from)
+                    .ok_or_else(|| anyhow::anyhow!("HOME environment variable is not set"))?;
+                self.active_backend()
+                    .normalize_existing_path("home", &home)?
+            }
+            BackendSpec::Sftp(info) => self
+                .active_backend()
+                .normalize_existing_path("home", &info.root_path)?,
+        };
         let panel = self.active_panel_mut();
         panel.cwd = normalized;
         panel.selected_index = 0;
         panel.clear_selection_anchor();
         self.reload_panel(self.state.active_panel, true)
+    }
+
+    fn open_viewer(&mut self) -> Result<bool> {
+        if !matches!(self.active_backend_spec(), BackendSpec::Local) {
+            self.show_alert("viewer is available only for local files in current build");
+            return Ok(true);
+        }
+
+        let entry = self.selected_action_target_entry()?;
+        if entry.entry_type == FsEntryType::Directory {
+            return Err(anyhow::anyhow!(
+                "viewer is available for files only (selected '{}')",
+                entry.name
+            ));
+        }
+
+        let path = self
+            .active_backend()
+            .normalize_existing_path("viewer", &entry.path)?;
+        let viewer_state = load_viewer_state(path.clone(), entry.name, entry.size_bytes)?;
+
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.pending_sftp_connect = None;
+        self.state.dialog = None;
+        self.state.viewer = Some(viewer_state);
+        self.state.screen_mode = ScreenMode::Viewer;
+        self.state.status_line = format!("viewer opened: {}", path.display());
+        Ok(true)
+    }
+
+    fn open_editor(&mut self) -> Result<bool> {
+        if !matches!(self.active_backend_spec(), BackendSpec::Local) {
+            self.show_alert("external editor is available only for local files");
+            return Ok(true);
+        }
+
+        let entry = self.selected_action_target_entry()?;
+        if entry.entry_type == FsEntryType::Directory {
+            return Err(anyhow::anyhow!(
+                "editor is available for files only (selected '{}')",
+                entry.name
+            ));
+        }
+
+        let editor = std::env::var("EDITOR")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+        let Some(editor) = editor else {
+            self.show_alert("EDITOR is not set. Example: export EDITOR='nvim'");
+            return Ok(true);
+        };
+
+        let path = self
+            .active_backend()
+            .normalize_existing_path("edit", &entry.path)?;
+
+        runtime::set_input_poll_paused(true);
+        if let Err(err) = terminal::suspend_for_external_process() {
+            runtime::set_input_poll_paused(false);
+            return Err(err);
+        }
+
+        let run_result = run_external_editor_command(editor.as_str(), &path);
+        let resume_result = terminal::resume_after_external_process();
+        runtime::set_input_poll_paused(false);
+
+        resume_result?;
+        let status = run_result?;
+        if !status.success() {
+            self.show_alert(format!("editor exited with status: {status}"));
+            return Ok(true);
+        }
+
+        self.reload_panel(PanelId::Left, false)?;
+        self.reload_panel(PanelId::Right, false)?;
+        self.push_log(format!("editor closed: {}", path.display()));
+        Ok(true)
+    }
+
+    fn close_viewer(&mut self) -> Result<bool> {
+        if self.state.screen_mode != ScreenMode::Viewer {
+            return Ok(false);
+        }
+
+        self.state.screen_mode = ScreenMode::Normal;
+        self.state.viewer = None;
+        self.state.status_line = "viewer closed".to_string();
+        Ok(true)
+    }
+
+    fn viewer_scroll_up(&mut self) -> Result<bool> {
+        let Some(viewer) = self.state.viewer.as_mut() else {
+            return Ok(false);
+        };
+        let previous = viewer.scroll_offset;
+        viewer.scroll_offset = viewer.scroll_offset.saturating_sub(1);
+        Ok(previous != viewer.scroll_offset)
+    }
+
+    fn viewer_scroll_down(&mut self) -> Result<bool> {
+        let Some(viewer) = self.state.viewer.as_mut() else {
+            return Ok(false);
+        };
+        let previous = viewer.scroll_offset;
+        let max_offset = viewer.lines.len().saturating_sub(1);
+        viewer.scroll_offset = (viewer.scroll_offset + 1).min(max_offset);
+        Ok(previous != viewer.scroll_offset)
+    }
+
+    fn viewer_page_up(&mut self) -> Result<bool> {
+        let step = self.viewer_page_step();
+        let Some(viewer) = self.state.viewer.as_mut() else {
+            return Ok(false);
+        };
+        let previous = viewer.scroll_offset;
+        viewer.scroll_offset = viewer.scroll_offset.saturating_sub(step);
+        Ok(previous != viewer.scroll_offset)
+    }
+
+    fn viewer_page_down(&mut self) -> Result<bool> {
+        let step = self.viewer_page_step();
+        let Some(viewer) = self.state.viewer.as_mut() else {
+            return Ok(false);
+        };
+        let previous = viewer.scroll_offset;
+        let max_offset = viewer.lines.len().saturating_sub(1);
+        viewer.scroll_offset = (viewer.scroll_offset.saturating_add(step)).min(max_offset);
+        Ok(previous != viewer.scroll_offset)
+    }
+
+    fn viewer_top(&mut self) -> Result<bool> {
+        let Some(viewer) = self.state.viewer.as_mut() else {
+            return Ok(false);
+        };
+        let previous = viewer.scroll_offset;
+        viewer.scroll_offset = 0;
+        Ok(previous != viewer.scroll_offset)
+    }
+
+    fn viewer_bottom(&mut self) -> Result<bool> {
+        let Some(viewer) = self.state.viewer.as_mut() else {
+            return Ok(false);
+        };
+        let previous = viewer.scroll_offset;
+        viewer.scroll_offset = viewer.lines.len().saturating_sub(1);
+        Ok(previous != viewer.scroll_offset)
+    }
+
+    fn viewer_page_step(&self) -> usize {
+        self.state.terminal_size.height.saturating_sub(4).max(1) as usize
+    }
+
+    fn handle_sftp_action(&mut self) -> Result<bool> {
+        let panel_id = self.state.active_panel;
+        if matches!(self.backend_spec(panel_id), BackendSpec::Sftp(_)) {
+            return self.disconnect_sftp_panel(panel_id);
+        }
+        self.start_sftp_connect()
     }
 
     fn toggle_sort(&mut self) -> Result<bool> {
@@ -398,11 +812,69 @@ impl App {
         self.reload_panel(self.state.active_panel, true)
     }
 
+    fn start_sftp_connect(&mut self) -> Result<bool> {
+        let panel_id = self.state.active_panel;
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        let default_value = match self.backend_spec(panel_id) {
+            BackendSpec::Sftp(info) => {
+                format!("{}:{}{}", info.host, info.port, info.root_path.display())
+            }
+            BackendSpec::Local => "192.168.1.250:22/".to_string(),
+        };
+        self.pending_sftp_connect = Some(PendingSftpConnect {
+            panel_id,
+            stage: SftpConnectStage::Address,
+            draft: SftpConnectDraft {
+                host: String::new(),
+                port: 22,
+                root_path: PathBuf::from("/"),
+                user: None,
+            },
+        });
+        self.state.dialog = Some(input_dialog(
+            "SFTP Connect",
+            "Enter address: host[:port][/path] or 'local'",
+            default_value,
+            DialogTone::Default,
+        ));
+        self.state.status_line = "sftp connect: enter address".to_string();
+        Ok(true)
+    }
+
+    fn disconnect_sftp_panel(&mut self, panel_id: PanelId) -> Result<bool> {
+        if !matches!(self.backend_spec(panel_id), BackendSpec::Sftp(_)) {
+            return Ok(false);
+        }
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.pending_sftp_connect = None;
+        self.state.dialog = None;
+
+        let local_cwd = self.last_local_cwd(panel_id);
+        let (redraw, used_path) = match self.attach_panel_to_local(panel_id, local_cwd.clone()) {
+            Ok(redraw) => (redraw, local_cwd),
+            Err(_) => {
+                let fallback = env::current_dir()
+                    .map_err(|err| anyhow::anyhow!("cannot resolve local cwd: {err}"))?;
+                let redraw = self.attach_panel_to_local(panel_id, fallback.clone())?;
+                (redraw, fallback)
+            }
+        };
+        self.push_log(format!("sftp disconnected: {}", used_path.display()));
+        Ok(redraw)
+    }
+
     fn start_search(&mut self) -> Result<bool> {
         let panel_id = self.state.active_panel;
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_sftp_connect = None;
         self.state.dialog = None;
         self.input_mode = Some(InputMode::Search(panel_id));
         let query = self.panel_mut(panel_id).search_query.clone();
@@ -447,6 +919,7 @@ impl App {
         self.input_mode = None;
         self.pending_confirmation = None;
         self.pending_rename = None;
+        self.pending_sftp_connect = None;
         self.pending_mask = Some(PendingMask { panel_id, select });
         let title = if select {
             "Select by mask"
@@ -504,7 +977,9 @@ impl App {
         }
 
         let entry = self.selected_action_target_entry()?;
-        let path = self.fs.normalize_existing_path("delete", &entry.path)?;
+        let path = self
+            .active_backend()
+            .normalize_existing_path("delete", &entry.path)?;
         self.guard_delete_target(&path)?;
 
         self.pending_confirmation = Some(PendingConfirmation::DeleteOne {
@@ -545,7 +1020,9 @@ impl App {
                 ));
             }
 
-            let source = self.fs.normalize_existing_path("batch", &entry.path)?;
+            let source = self
+                .active_backend()
+                .normalize_existing_path("batch", &entry.path)?;
             if !unique_sources.insert(source.clone()) {
                 return Err(anyhow::anyhow!(
                     "duplicate source in batch: {}",
@@ -569,7 +1046,7 @@ impl App {
                             target.display()
                         ));
                     }
-                    if target.try_exists()? {
+                    if self.path_exists_on_backend(self.inactive_backend(), &target) {
                         return Err(anyhow::anyhow!(
                             "destination already exists: {}",
                             target.display()
@@ -630,6 +1107,7 @@ impl App {
         self.input_mode = None;
         self.pending_confirmation = None;
         self.pending_mask = None;
+        self.pending_sftp_connect = None;
         let destination_dir = self.inactive_panel_cwd();
         self.pending_rename = Some(PendingRename {
             kind,
@@ -678,10 +1156,17 @@ impl App {
         log_message: bool,
     ) -> Result<bool> {
         let queued_message = queued_message.into();
+        let source_backend = self.active_backend_spec().clone();
+        let destination_backend = match kind {
+            JobKind::Copy | JobKind::Move => Some(self.inactive_backend_spec().clone()),
+            JobKind::Delete | JobKind::Mkdir => None,
+        };
         let request = JobRequest {
             id: self.next_job_id,
             batch_id,
             kind,
+            source_backend,
+            destination_backend,
             source: source.clone(),
             destination: destination.clone(),
         };
@@ -694,6 +1179,9 @@ impl App {
             status: JobStatus::Queued,
             source,
             destination,
+            current_item: None,
+            batch_completed: None,
+            batch_total: None,
             message: Some(queued_message.to_string()),
         });
         if log_message {
@@ -707,6 +1195,11 @@ impl App {
         let total = plan.items.len();
         let kind = plan.kind;
         let batch_id = plan.batch_id;
+        let first_file = plan
+            .items
+            .first()
+            .map(|item| item.name.clone())
+            .unwrap_or_else(|| "-".to_string());
         if total == 0 {
             return Ok(false);
         }
@@ -718,18 +1211,24 @@ impl App {
                 total,
                 completed: 0,
                 failed: 0,
+                current_file: first_file,
             },
         );
+        self.sync_visible_batch_progress(Some(batch_id));
 
         for item in plan.items {
-            self.enqueue_job_with_options(
+            if let Err(err) = self.enqueue_job_with_options(
                 kind,
                 item.source,
                 item.destination,
                 Some(batch_id),
                 format!("{} queued: {}", operation_name(kind), item.name),
                 false,
-            )?;
+            ) {
+                self.batch_progress.remove(&batch_id);
+                self.sync_visible_batch_progress(None);
+                return Err(err);
+            }
         }
 
         self.push_log(format!(
@@ -738,6 +1237,80 @@ impl App {
             total
         ));
         Ok(true)
+    }
+
+    fn sync_visible_batch_progress(&mut self, preferred_batch_id: Option<u64>) {
+        let preferred = preferred_batch_id.and_then(|batch_id| {
+            self.batch_progress.get(&batch_id).map(|progress| {
+                (
+                    batch_id,
+                    progress.kind,
+                    progress.current_file.clone(),
+                    progress.completed,
+                    progress.total,
+                    progress.failed,
+                )
+            })
+        });
+
+        let selected = preferred.or_else(|| {
+            self.batch_progress
+                .iter()
+                .max_by_key(|(batch_id, _)| *batch_id)
+                .map(|(batch_id, progress)| {
+                    (
+                        *batch_id,
+                        progress.kind,
+                        progress.current_file.clone(),
+                        progress.completed,
+                        progress.total,
+                        progress.failed,
+                    )
+                })
+        });
+
+        self.state.batch_progress = selected.map(
+            |(batch_id, operation, current_file, completed, total, failed)| BatchProgressState {
+                batch_id,
+                operation,
+                current_file,
+                completed,
+                total,
+                failed,
+            },
+        );
+    }
+
+    fn attach_panel_to_local(&mut self, panel_id: PanelId, cwd: PathBuf) -> Result<bool> {
+        let backend_spec = BackendSpec::Local;
+        let backend = backend_from_spec(&backend_spec);
+        let normalized = backend.normalize_existing_path("connect_local", &cwd)?;
+        self.set_panel_backend(panel_id, backend_spec);
+        self.set_last_local_cwd(panel_id, normalized.clone());
+        let panel = self.panel_mut(panel_id);
+        panel.cwd = normalized;
+        panel.selected_index = 0;
+        panel.clear_selection_anchor();
+        self.reload_panel(panel_id, true)
+    }
+
+    fn attach_panel_to_sftp(
+        &mut self,
+        panel_id: PanelId,
+        conn: SftpConnectionInfo,
+    ) -> Result<bool> {
+        if matches!(self.backend_spec(panel_id), BackendSpec::Local) {
+            self.set_last_local_cwd(panel_id, self.panel(panel_id).cwd.clone());
+        }
+        let backend_spec = BackendSpec::Sftp(conn.clone());
+        let backend = backend_from_spec(&backend_spec);
+        let normalized = backend.normalize_existing_path("connect_sftp", &conn.root_path)?;
+        self.set_panel_backend(panel_id, backend_spec);
+        let panel = self.panel_mut(panel_id);
+        panel.cwd = normalized;
+        panel.selected_index = 0;
+        panel.clear_selection_anchor();
+        self.reload_panel(panel_id, true)
     }
 
     fn inactive_panel_cwd(&self) -> PathBuf {
@@ -750,7 +1323,7 @@ impl App {
     fn find_available_directory_name(&self, base_dir: PathBuf, stem: &str) -> PathBuf {
         let mut candidate = base_dir.join(stem);
         let mut index = 1_u32;
-        while candidate.exists() {
+        while self.path_exists_on_backend(self.active_backend(), candidate.as_path()) {
             candidate = base_dir.join(format!("{stem}_{index}"));
             index += 1;
         }
@@ -780,15 +1353,17 @@ impl App {
             ));
         }
 
-        if let Some(home) = std::env::var_os("HOME") {
-            let home_path = self
-                .fs
-                .normalize_existing_path("delete", &PathBuf::from(home))?;
-            if *target == home_path {
-                return Err(anyhow::anyhow!(
-                    "refusing to delete HOME directory: {}",
-                    home_path.display()
-                ));
+        if matches!(self.active_backend_spec(), BackendSpec::Local) {
+            if let Some(home) = env::var_os("HOME") {
+                let home_path = self
+                    .active_backend()
+                    .normalize_existing_path("delete", &PathBuf::from(home))?;
+                if *target == home_path {
+                    return Err(anyhow::anyhow!(
+                        "refusing to delete HOME directory: {}",
+                        home_path.display()
+                    ));
+                }
             }
         }
 
@@ -872,6 +1447,17 @@ impl App {
             };
         }
 
+        if self.pending_sftp_connect.is_some() {
+            return if role == DialogButtonRole::Primary {
+                self.apply_sftp_connect()
+            } else {
+                self.pending_sftp_connect = None;
+                self.state.dialog = None;
+                self.push_log("sftp connect canceled");
+                true
+            };
+        }
+
         self.state.dialog = None;
         true
     }
@@ -895,6 +1481,13 @@ impl App {
             self.pending_mask = None;
             self.state.dialog = None;
             self.push_log("mask selection canceled");
+            return true;
+        }
+
+        if self.pending_sftp_connect.is_some() {
+            self.pending_sftp_connect = None;
+            self.state.dialog = None;
+            self.push_log("sftp connect canceled");
             return true;
         }
 
@@ -1014,8 +1607,186 @@ impl App {
         true
     }
 
+    fn apply_sftp_connect(&mut self) -> bool {
+        let pending = self.pending_sftp_connect.take();
+        let value = self
+            .state
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.input_value.as_ref())
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        self.state.dialog = None;
+
+        let Some(mut pending) = pending else {
+            return true;
+        };
+        if value.is_empty() {
+            self.show_alert("sftp connect value cannot be empty");
+            return true;
+        }
+
+        match pending.stage {
+            SftpConnectStage::Address => {
+                if value.eq_ignore_ascii_case("local") {
+                    let result = env::current_dir()
+                        .map_err(|err| anyhow::anyhow!("cannot resolve local cwd: {err}"))
+                        .and_then(|cwd| self.attach_panel_to_local(pending.panel_id, cwd));
+                    return match result {
+                        Ok(redraw) => redraw,
+                        Err(err) => {
+                            self.show_alert(format!("sftp connect failed: {err}"));
+                            true
+                        }
+                    };
+                }
+
+                match parse_sftp_address_input(value.as_str()) {
+                    Ok((user_from_address, host, port, root_path)) => {
+                        pending.draft.host = host;
+                        pending.draft.port = port;
+                        pending.draft.root_path = root_path;
+                        pending.draft.user = user_from_address;
+                    }
+                    Err(err) => {
+                        self.show_alert(format!("sftp connect failed: {err}"));
+                        return true;
+                    }
+                }
+
+                if pending.draft.user.is_none() {
+                    return self.prompt_sftp_login(pending);
+                }
+                self.proceed_sftp_auth_flow(pending)
+            }
+            SftpConnectStage::Login => {
+                pending.draft.user = Some(value.trim().to_string());
+                self.proceed_sftp_auth_flow(pending)
+            }
+            SftpConnectStage::Password => {
+                let Some(user) = pending.draft.user.clone() else {
+                    self.show_alert("sftp connect failed: login is missing");
+                    return true;
+                };
+                let conn = SftpConnectionInfo {
+                    host: pending.draft.host.clone(),
+                    user,
+                    port: pending.draft.port,
+                    root_path: pending.draft.root_path.clone(),
+                    auth: SftpAuth::Password(value),
+                };
+                match self.attach_panel_to_sftp(pending.panel_id, conn) {
+                    Ok(redraw) => redraw,
+                    Err(err) => {
+                        self.show_alert(format!("sftp connect failed: {err}"));
+                        true
+                    }
+                }
+            }
+            SftpConnectStage::KeyPath => {
+                let Some(user) = pending.draft.user.clone() else {
+                    self.show_alert("sftp connect failed: login is missing");
+                    return true;
+                };
+                let conn = SftpConnectionInfo {
+                    host: pending.draft.host.clone(),
+                    user,
+                    port: pending.draft.port,
+                    root_path: pending.draft.root_path.clone(),
+                    auth: SftpAuth::KeyFile {
+                        path: expand_tilde_path(value.as_str()),
+                        passphrase: None,
+                    },
+                };
+                match self.attach_panel_to_sftp(pending.panel_id, conn) {
+                    Ok(redraw) => redraw,
+                    Err(err) => {
+                        self.show_alert(format!("sftp connect failed: {err}"));
+                        true
+                    }
+                }
+            }
+        }
+    }
+
+    fn proceed_sftp_auth_flow(&mut self, pending: PendingSftpConnect) -> bool {
+        let Some(user) = pending.draft.user.clone() else {
+            return self.prompt_sftp_login(pending);
+        };
+        if user.trim().is_empty() {
+            return self.prompt_sftp_login(pending);
+        }
+
+        let hint = match probe_sftp_auth_hint(
+            pending.draft.host.as_str(),
+            pending.draft.port,
+            user.as_str(),
+        ) {
+            Ok(hint) => hint,
+            Err(_) => SftpAuthHint::Either,
+        };
+
+        if hint == SftpAuthHint::KeyOnly {
+            return self.prompt_sftp_key_path(pending);
+        }
+
+        if hint == SftpAuthHint::PasswordOnly {
+            return self.prompt_sftp_password(pending);
+        }
+
+        self.prompt_sftp_password(pending)
+    }
+
+    fn prompt_sftp_login(&mut self, mut pending: PendingSftpConnect) -> bool {
+        pending.stage = SftpConnectStage::Login;
+        let default_login = pending
+            .draft
+            .user
+            .clone()
+            .unwrap_or_else(|| env::var("USER").unwrap_or_default());
+        self.pending_sftp_connect = Some(pending);
+        self.state.dialog = Some(input_dialog(
+            "SFTP Login",
+            "Enter login name",
+            default_login,
+            DialogTone::Default,
+        ));
+        self.state.status_line = "sftp connect: enter login".to_string();
+        true
+    }
+
+    fn prompt_sftp_password(&mut self, mut pending: PendingSftpConnect) -> bool {
+        pending.stage = SftpConnectStage::Password;
+        self.pending_sftp_connect = Some(pending);
+        self.state.dialog = Some(input_dialog_with_mask(
+            "SFTP Password",
+            "Enter password",
+            String::new(),
+            DialogTone::Warning,
+            true,
+        ));
+        self.state.status_line = "sftp connect: password required".to_string();
+        true
+    }
+
+    fn prompt_sftp_key_path(&mut self, mut pending: PendingSftpConnect) -> bool {
+        pending.stage = SftpConnectStage::KeyPath;
+        self.pending_sftp_connect = Some(pending);
+        self.state.dialog = Some(input_dialog(
+            "SFTP Key",
+            "Enter private key path",
+            "~/.ssh/id_rsa".to_string(),
+            DialogTone::Warning,
+        ));
+        self.state.status_line = "sftp connect: key path required".to_string();
+        true
+    }
+
     fn edit_dialog_input_backspace(&mut self) -> bool {
-        if self.pending_rename.is_none() && self.pending_mask.is_none() {
+        if self.pending_rename.is_none()
+            && self.pending_mask.is_none()
+            && self.pending_sftp_connect.is_none()
+        {
             return false;
         }
         if let Some(dialog) = self.state.dialog.as_mut() {
@@ -1028,7 +1799,10 @@ impl App {
     }
 
     fn edit_dialog_input_char(&mut self, c: char) -> bool {
-        if self.pending_rename.is_none() && self.pending_mask.is_none() {
+        if self.pending_rename.is_none()
+            && self.pending_mask.is_none()
+            && self.pending_sftp_connect.is_none()
+        {
             return false;
         }
         if c == '\0' {
@@ -1110,6 +1884,168 @@ impl App {
         }
     }
 
+    fn handle_command_line_input(&mut self, key: &KeyEvent) -> Option<bool> {
+        if self.state.dialog.is_some() || self.state.screen_mode == ScreenMode::Viewer {
+            return None;
+        }
+        if self.input_mode.is_some() {
+            return None;
+        }
+
+        if !self.state.command_line.active {
+            if key.code == KeyCode::Char(':') && key.modifiers.is_empty() {
+                self.state.command_line.active = true;
+                self.state.status_line = "command line active".to_string();
+                return Some(true);
+            }
+            return None;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.state.command_line.active = false;
+                self.state.command_line.input.clear();
+                self.state.status_line = "command line canceled".to_string();
+                Some(true)
+            }
+            KeyCode::Enter => {
+                self.state.command_line.active = false;
+                let command = std::mem::take(&mut self.state.command_line.input);
+                match self.execute_command_line(command.as_str()) {
+                    Ok(redraw) => Some(redraw),
+                    Err(err) => {
+                        self.show_alert(format!("command failed: {err}"));
+                        Some(true)
+                    }
+                }
+            }
+            KeyCode::Backspace => {
+                self.state.command_line.input.pop();
+                Some(true)
+            }
+            KeyCode::Char(c)
+                if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
+            {
+                self.state.command_line.input.push(c);
+                Some(true)
+            }
+            _ => Some(false),
+        }
+    }
+
+    fn execute_command_line(&mut self, raw: &str) -> Result<bool> {
+        let command = raw.trim();
+        if command.is_empty() {
+            self.state.status_line = "command line: empty".to_string();
+            return Ok(true);
+        }
+
+        if command == "cd" {
+            return self.go_to_home();
+        }
+
+        if let Some(path) = command.strip_prefix("cd ") {
+            return self.command_line_cd(path.trim());
+        }
+
+        if matches!(command, "sh" | "shell") {
+            return self.open_shell_mode();
+        }
+
+        if looks_like_path_command(command) {
+            return self.command_line_cd(command);
+        }
+
+        self.command_line_run_shell(command)
+    }
+
+    fn command_line_cd(&mut self, raw_path: &str) -> Result<bool> {
+        let trimmed = raw_path.trim();
+        if trimmed.is_empty() {
+            return self.go_to_home();
+        }
+
+        let current = self.active_panel().cwd.clone();
+        let candidate = resolve_command_path(trimmed, &current, self.active_backend_spec());
+        let normalized = self
+            .active_backend()
+            .normalize_existing_path("command_cd", &candidate)?;
+
+        let panel = self.active_panel_mut();
+        panel.cwd = normalized.clone();
+        panel.selected_index = 0;
+        panel.clear_selection_anchor();
+        self.push_log(format!("cd {}", normalized.display()));
+        self.reload_panel(self.state.active_panel, false)
+    }
+
+    fn command_line_run_shell(&mut self, command: &str) -> Result<bool> {
+        if !matches!(self.active_backend_spec(), BackendSpec::Local) {
+            self.show_alert("shell commands are available only on local panel");
+            return Ok(true);
+        }
+
+        let cwd = self.active_panel().cwd.clone();
+        runtime::set_input_poll_paused(true);
+        if let Err(err) = terminal::suspend_for_external_process() {
+            runtime::set_input_poll_paused(false);
+            return Err(err);
+        }
+
+        let run_result = run_shell_command_with_pause(command, &cwd);
+        let resume_result = terminal::resume_after_external_process();
+        runtime::set_input_poll_paused(false);
+        resume_result?;
+
+        let status = run_result?;
+        if !status.success() {
+            self.push_log(format!("command exited with status: {status}"));
+        } else {
+            self.push_log(format!("command done: {command}"));
+        }
+
+        self.reload_panel(PanelId::Left, false)?;
+        self.reload_panel(PanelId::Right, false)?;
+        Ok(true)
+    }
+
+    fn open_shell_mode(&mut self) -> Result<bool> {
+        if self.state.dialog.is_some() || self.state.screen_mode == ScreenMode::Viewer {
+            return Ok(false);
+        }
+        if self.input_mode.is_some() || self.state.command_line.active {
+            return Ok(false);
+        }
+
+        let panel_id = self.state.active_panel;
+        let initial_cwd = match self.backend_spec(panel_id) {
+            BackendSpec::Local => self.active_panel().cwd.clone(),
+            BackendSpec::Sftp(_) => self.last_local_cwd(panel_id),
+        };
+        let cwd = if initial_cwd.exists() {
+            initial_cwd
+        } else {
+            env::current_dir().map_err(|err| anyhow::anyhow!("cannot resolve local cwd: {err}"))?
+        };
+
+        runtime::set_input_poll_paused(true);
+        if let Err(err) = terminal::suspend_for_external_process() {
+            runtime::set_input_poll_paused(false);
+            return Err(err);
+        }
+
+        let run_result = run_interactive_shell(&cwd);
+        let resume_result = terminal::resume_after_external_process();
+        runtime::set_input_poll_paused(false);
+        resume_result?;
+        run_result?;
+
+        let _ = self.reload_panel(PanelId::Left, false);
+        let _ = self.reload_panel(PanelId::Right, false);
+        self.push_log("shell mode closed");
+        Ok(true)
+    }
+
     fn update_selection_status(&mut self) {
         let panel = self.active_panel();
         let (count, bytes) = panel.selection_summary();
@@ -1136,6 +2072,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_sftp_connect = None;
         self.state.dialog = Some(alert_dialog(message.clone()));
         self.push_log(message);
     }
@@ -1149,18 +2086,47 @@ fn map_key_to_command(key: &KeyEvent) -> Option<Command> {
         KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
             Some(Command::SelectRangeDown)
         }
+        KeyCode::Char(c)
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(c, 'a' | 'A' | '\u{1}') =>
+        {
+            Some(Command::MoveSelectionTop)
+        }
+        KeyCode::Char(c)
+            if key.modifiers.contains(KeyModifiers::CONTROL)
+                && matches!(c, 'e' | 'E' | '\u{5}') =>
+        {
+            Some(Command::MoveSelectionBottom)
+        }
+        KeyCode::Up
+            if key.modifiers != KeyModifiers::NONE && key.modifiers != KeyModifiers::SHIFT =>
+        {
+            Some(Command::MoveSelectionTop)
+        }
+        KeyCode::Down
+            if key.modifiers != KeyModifiers::NONE && key.modifiers != KeyModifiers::SHIFT =>
+        {
+            Some(Command::MoveSelectionBottom)
+        }
         KeyCode::Up => Some(Command::MoveSelectionUp),
         KeyCode::Down => Some(Command::MoveSelectionDown),
+        KeyCode::Home => Some(Command::MoveSelectionTop),
+        KeyCode::End => Some(Command::MoveSelectionBottom),
+        KeyCode::PageUp => Some(Command::MoveSelectionTop),
+        KeyCode::PageDown => Some(Command::MoveSelectionBottom),
         KeyCode::Enter => Some(Command::OpenSelected),
         KeyCode::Backspace => Some(Command::GoToParent),
         KeyCode::Char(' ') | KeyCode::Insert => Some(Command::ToggleSelectCurrent),
         KeyCode::Char('+') => Some(Command::StartSelectByMask),
         KeyCode::Char('-') => Some(Command::StartDeselectByMask),
         KeyCode::Char('*') => Some(Command::InvertSelection),
+        KeyCode::F(3) => Some(Command::OpenViewer),
+        KeyCode::F(4) => Some(Command::OpenEditor),
         KeyCode::F(5) => Some(Command::Copy),
         KeyCode::F(6) => Some(Command::Move),
         KeyCode::F(7) => Some(Command::Mkdir),
         KeyCode::F(8) => Some(Command::Delete),
+        KeyCode::F(9) => Some(Command::ConnectSftp),
         KeyCode::F(10) => Some(Command::Quit),
         KeyCode::F(2) => Some(Command::ToggleSort),
         KeyCode::Char('r') => Some(Command::Refresh),
@@ -1168,9 +2134,187 @@ fn map_key_to_command(key: &KeyEvent) -> Option<Command> {
             Some(Command::StartSearch)
         }
         KeyCode::Char('~') => Some(Command::GoHome),
-        KeyCode::Home => Some(Command::GoHome),
         _ => None,
     }
+}
+
+fn map_viewer_key_to_command(key: &KeyEvent) -> Option<Command> {
+    match key.code {
+        KeyCode::Esc | KeyCode::F(3) => Some(Command::CloseViewer),
+        KeyCode::Char('q') if key.modifiers.is_empty() => Some(Command::CloseViewer),
+        KeyCode::Up => Some(Command::ViewerScrollUp),
+        KeyCode::Down => Some(Command::ViewerScrollDown),
+        KeyCode::PageUp => Some(Command::ViewerPageUp),
+        KeyCode::PageDown => Some(Command::ViewerPageDown),
+        KeyCode::Home => Some(Command::ViewerTop),
+        KeyCode::End => Some(Command::ViewerBottom),
+        _ => None,
+    }
+}
+
+fn run_external_editor_command(editor: &str, path: &Path) -> Result<std::process::ExitStatus> {
+    let command_line = format!("{editor} {}", shell_escape_path(path));
+    ProcessCommand::new("sh")
+        .arg("-lc")
+        .arg(command_line)
+        .status()
+        .map_err(|err| anyhow::anyhow!("failed to launch EDITOR: {err}"))
+}
+
+fn run_shell_command_with_pause(command: &str, cwd: &Path) -> Result<std::process::ExitStatus> {
+    let shell = shell_program();
+    let wrapped_script = format!(
+        "{command}\nstatus=$?\nprintf '\\n[Press Enter to return to vcmc] '\nread _\nexit $status\n"
+    );
+    ProcessCommand::new(shell.as_str())
+        .arg("-lc")
+        .arg(wrapped_script)
+        .current_dir(cwd)
+        .status()
+        .map_err(|err| anyhow::anyhow!("failed to execute shell command: {err}"))
+}
+
+fn run_interactive_shell(cwd: &Path) -> Result<std::process::ExitStatus> {
+    let shell = shell_program();
+    ProcessCommand::new(shell.as_str())
+        .arg("-i")
+        .current_dir(cwd)
+        .status()
+        .map_err(|err| anyhow::anyhow!("failed to launch shell: {err}"))
+}
+
+fn shell_program() -> String {
+    env::var("SHELL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "sh".to_string())
+}
+
+fn shell_escape_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    format!("'{}'", raw.replace('\'', r#"'"'"'"#))
+}
+
+fn looks_like_path_command(command: &str) -> bool {
+    command.starts_with('/')
+        || command.starts_with("./")
+        || command.starts_with("../")
+        || command == ".."
+        || command.starts_with("~/")
+        || command == "~"
+}
+
+fn resolve_command_path(raw_path: &str, current: &Path, backend_spec: &BackendSpec) -> PathBuf {
+    if raw_path == "~" || raw_path.starts_with("~/") {
+        return match backend_spec {
+            BackendSpec::Local => expand_tilde_path(raw_path),
+            BackendSpec::Sftp(info) => {
+                if raw_path == "~" {
+                    info.root_path.clone()
+                } else if let Some(rest) = raw_path.strip_prefix("~/") {
+                    info.root_path.join(rest)
+                } else {
+                    info.root_path.clone()
+                }
+            }
+        };
+    }
+
+    let candidate = PathBuf::from(raw_path);
+    if candidate.is_absolute() {
+        candidate
+    } else {
+        current.join(candidate)
+    }
+}
+
+fn source_item_label(path: &Path) -> String {
+    path.file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
+}
+
+fn parse_sftp_address_input(input: &str) -> Result<(Option<String>, String, u16, PathBuf)> {
+    let mut value = input.trim().to_string();
+    if value.is_empty() {
+        return Err(anyhow::anyhow!("address cannot be empty"));
+    }
+    if let Some(rest) = value.strip_prefix("sftp://") {
+        value = rest.to_string();
+    }
+
+    let (endpoint, path_part) = if let Some((left, right)) = value.split_once('/') {
+        (left.to_string(), format!("/{}", right))
+    } else {
+        (value, "/".to_string())
+    };
+
+    let (user, host_port) = if let Some((user, host_part)) = endpoint.split_once('@') {
+        (Some(user.to_string()), host_part.to_string())
+    } else {
+        (None, endpoint)
+    };
+    let (host, port) = if let Some((host, port_raw)) = host_port.rsplit_once(':') {
+        if port_raw.chars().all(|ch| ch.is_ascii_digit()) {
+            let port = port_raw
+                .parse::<u16>()
+                .map_err(|_| anyhow::anyhow!("invalid port: {port_raw}"))?;
+            (host.to_string(), port)
+        } else {
+            (host_port, 22)
+        }
+    } else {
+        (host_port, 22)
+    };
+
+    if host.trim().is_empty() {
+        return Err(anyhow::anyhow!("host cannot be empty"));
+    }
+    Ok((user, host, port, PathBuf::from(path_part)))
+}
+
+fn probe_sftp_auth_hint(host: &str, port: u16, user: &str) -> Result<SftpAuthHint> {
+    let endpoint = format!("{host}:{port}");
+    let tcp = TcpStream::connect(endpoint.as_str())?;
+    tcp.set_read_timeout(Some(Duration::from_secs(8)))?;
+    tcp.set_write_timeout(Some(Duration::from_secs(8)))?;
+
+    let mut session = Session::new()?;
+    session.set_tcp_stream(tcp);
+    session.handshake()?;
+    let methods = session.auth_methods(user).unwrap_or_default();
+    let has_publickey = methods
+        .split(',')
+        .any(|method| method.trim() == "publickey");
+    let has_password = methods
+        .split(',')
+        .any(|method| method.trim() == "password" || method.trim() == "keyboard-interactive");
+
+    let hint = match (has_publickey, has_password) {
+        (true, false) => SftpAuthHint::KeyOnly,
+        (false, true) => SftpAuthHint::PasswordOnly,
+        (true, true) => SftpAuthHint::Either,
+        (false, false) => SftpAuthHint::Either,
+    };
+    Ok(hint)
+}
+
+fn expand_tilde_path(raw: &str) -> PathBuf {
+    if raw == "~" {
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home);
+        }
+        return PathBuf::from(raw);
+    }
+
+    if let Some(rest) = raw.strip_prefix("~/") {
+        if let Some(home) = env::var_os("HOME") {
+            return PathBuf::from(home).join(rest);
+        }
+    }
+
+    PathBuf::from(raw)
 }
 
 fn operation_name(kind: JobKind) -> &'static str {
@@ -1248,10 +2392,21 @@ fn accelerator_from_key(key: &KeyEvent) -> Option<char> {
 }
 
 fn input_dialog(title: &str, body: &str, value: String, tone: DialogTone) -> DialogState {
+    input_dialog_with_mask(title, body, value, tone, false)
+}
+
+fn input_dialog_with_mask(
+    title: &str,
+    body: &str,
+    value: String,
+    tone: DialogTone,
+    mask_input: bool,
+) -> DialogState {
     DialogState {
         title: title.to_string(),
         body: body.to_string(),
         input_value: Some(value),
+        mask_input,
         buttons: vec![
             DialogButton {
                 label: "Apply".to_string(),
@@ -1274,6 +2429,7 @@ fn confirm_dialog(body: String) -> DialogState {
         title: "Confirm".to_string(),
         body,
         input_value: None,
+        mask_input: false,
         buttons: vec![
             DialogButton {
                 label: "Yes".to_string(),
@@ -1296,6 +2452,7 @@ fn alert_dialog(body: String) -> DialogState {
         title: "Error".to_string(),
         body,
         input_value: None,
+        mask_input: false,
         buttons: vec![DialogButton {
             label: "OK".to_string(),
             accelerator: Some('o'),

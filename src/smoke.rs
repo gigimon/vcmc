@@ -2,14 +2,19 @@ use std::env;
 use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use crossbeam_channel::{Receiver, unbounded};
 
+use crate::backend::backend_from_spec;
 use crate::fs::FsAdapter;
 use crate::jobs::WorkerPool;
-use crate::model::{Event, JobKind, JobRequest, JobStatus, SortMode};
+use crate::model::{
+    BackendSpec, Event, JobKind, JobRequest, JobStatus, SftpAuth, SftpConnectionInfo, SortMode,
+};
+use crate::viewer::load_viewer_state;
 
 pub struct SmokeReport {
     pub temp_root: PathBuf,
@@ -23,6 +28,13 @@ pub struct SmokeReport {
     pub batch_copy_total_ms: f64,
     pub batch_move_total_ms: f64,
     pub batch_delete_total_ms: f64,
+    pub viewer_text_mode_ok: bool,
+    pub viewer_binary_mode_ok: bool,
+    pub viewer_scroll_probe_ok: bool,
+    pub editor_roundtrip_ms: f64,
+    pub sftp_smoke_enabled: bool,
+    pub sftp_smoke_ok: bool,
+    pub sftp_smoke_total_ms: f64,
 }
 
 impl SmokeReport {
@@ -40,7 +52,14 @@ impl SmokeReport {
                 "batch_items: {}\n",
                 "batch_copy_total_ms: {:.2}\n",
                 "batch_move_total_ms: {:.2}\n",
-                "batch_delete_total_ms: {:.2}\n"
+                "batch_delete_total_ms: {:.2}\n",
+                "viewer_text_mode_ok: {}\n",
+                "viewer_binary_mode_ok: {}\n",
+                "viewer_scroll_probe_ok: {}\n",
+                "editor_roundtrip_ms: {:.2}\n",
+                "sftp_smoke_enabled: {}\n",
+                "sftp_smoke_ok: {}\n",
+                "sftp_smoke_total_ms: {:.2}\n"
             ),
             self.temp_root.display(),
             self.first_listing_ms,
@@ -52,7 +71,14 @@ impl SmokeReport {
             self.batch_items,
             self.batch_copy_total_ms,
             self.batch_move_total_ms,
-            self.batch_delete_total_ms
+            self.batch_delete_total_ms,
+            self.viewer_text_mode_ok,
+            self.viewer_binary_mode_ok,
+            self.viewer_scroll_probe_ok,
+            self.editor_roundtrip_ms,
+            self.sftp_smoke_enabled,
+            self.sftp_smoke_ok,
+            self.sftp_smoke_total_ms
         )
     }
 }
@@ -98,6 +124,8 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
         id: 1,
         batch_id: None,
         kind: JobKind::Copy,
+        source_backend: BackendSpec::Local,
+        destination_backend: Some(BackendSpec::Local),
         source: workload.copy_source.clone(),
         destination: Some(workload.copy_destination_dir.clone()),
     };
@@ -161,6 +189,8 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
             id,
             batch_id: Some(21),
             kind: JobKind::Copy,
+            source_backend: BackendSpec::Local,
+            destination_backend: Some(BackendSpec::Local),
             source: source.clone(),
             destination: Some(destination),
         })?;
@@ -198,6 +228,8 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
             id,
             batch_id: Some(22),
             kind: JobKind::Move,
+            source_backend: BackendSpec::Local,
+            destination_backend: Some(BackendSpec::Local),
             source: source_path,
             destination: Some(destination),
         })?;
@@ -238,6 +270,8 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
             id,
             batch_id: Some(23),
             kind: JobKind::Delete,
+            source_backend: BackendSpec::Local,
+            destination_backend: None,
             source: target.clone(),
             destination: None,
         })?;
@@ -257,6 +291,39 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
         }
     }
 
+    let text_size = fs::metadata(&workload.viewer_text_file)?.len();
+    let text_state = load_viewer_state(
+        workload.viewer_text_file.clone(),
+        "viewer_text.txt".to_string(),
+        text_size,
+    )?;
+    let viewer_text_mode_ok = !text_state.is_binary_like;
+    if !viewer_text_mode_ok {
+        bail!("viewer text probe incorrectly marked as binary-like");
+    }
+
+    let binary_size = fs::metadata(&workload.viewer_binary_file)?.len();
+    let binary_state = load_viewer_state(
+        workload.viewer_binary_file.clone(),
+        "viewer_binary.bin".to_string(),
+        binary_size,
+    )?;
+    let viewer_binary_mode_ok = binary_state.is_binary_like;
+    if !viewer_binary_mode_ok {
+        bail!("viewer binary probe was not detected as binary-like");
+    }
+
+    let viewer_scroll_probe_ok = probe_viewer_scroll(text_state.lines.len());
+    if !viewer_scroll_probe_ok {
+        bail!("viewer scroll probe failed for text sample");
+    }
+
+    let editor_roundtrip_start = Instant::now();
+    run_editor_roundtrip_probe(&workload.viewer_text_file)?;
+    let editor_roundtrip_ms = editor_roundtrip_start.elapsed().as_secs_f64() * 1_000.0;
+
+    let (sftp_smoke_enabled, sftp_smoke_ok, sftp_smoke_total_ms) = run_optional_sftp_smoke()?;
+
     Ok(SmokeReport {
         temp_root: temp_root.to_path_buf(),
         first_listing_ms,
@@ -269,6 +336,13 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
         batch_copy_total_ms,
         batch_move_total_ms,
         batch_delete_total_ms,
+        viewer_text_mode_ok,
+        viewer_binary_mode_ok,
+        viewer_scroll_probe_ok,
+        editor_roundtrip_ms,
+        sftp_smoke_enabled,
+        sftp_smoke_ok,
+        sftp_smoke_total_ms,
     })
 }
 
@@ -282,6 +356,8 @@ struct SmokeWorkload {
     batch_copy_destination: PathBuf,
     batch_move_destination: PathBuf,
     batch_delete_targets: Vec<PathBuf>,
+    viewer_text_file: PathBuf,
+    viewer_binary_file: PathBuf,
 }
 
 fn prepare_workload(root: &Path) -> Result<SmokeWorkload> {
@@ -331,6 +407,11 @@ fn prepare_workload(root: &Path) -> Result<SmokeWorkload> {
         batch_delete_targets.push(delete_file);
     }
 
+    let viewer_text_file = root.join("viewer_text.txt");
+    let viewer_binary_file = root.join("viewer_binary.bin");
+    create_viewer_text_file(&viewer_text_file, 400)?;
+    create_viewer_binary_file(&viewer_binary_file)?;
+
     Ok(SmokeWorkload {
         list_dir,
         navigation_paths,
@@ -341,6 +422,8 @@ fn prepare_workload(root: &Path) -> Result<SmokeWorkload> {
         batch_copy_destination,
         batch_move_destination,
         batch_delete_targets,
+        viewer_text_file,
+        viewer_binary_file,
     })
 }
 
@@ -365,6 +448,25 @@ fn create_single_file(path: &Path, size_bytes: usize) -> Result<u64> {
     Ok(written as u64)
 }
 
+fn create_viewer_text_file(path: &Path, lines: usize) -> Result<()> {
+    let mut file = File::create(path)?;
+    for idx in 0..lines {
+        writeln!(file, "line-{idx:04}\tviewer smoke text")?;
+    }
+    Ok(())
+}
+
+fn create_viewer_binary_file(path: &Path) -> Result<()> {
+    let mut file = File::create(path)?;
+    let mut bytes = Vec::with_capacity(4096);
+    for idx in 0..4096usize {
+        bytes.push((idx % 256) as u8);
+    }
+    bytes[128] = 0;
+    file.write_all(&bytes)?;
+    Ok(())
+}
+
 fn make_temp_root() -> PathBuf {
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -382,6 +484,98 @@ fn count_regular_files(path: &Path) -> Result<usize> {
         }
     }
     Ok(count)
+}
+
+fn probe_viewer_scroll(total_lines: usize) -> bool {
+    if total_lines < 3 {
+        return false;
+    }
+    let max_offset = total_lines.saturating_sub(1);
+    let mut offset = 0usize;
+    offset = (offset + 1).min(max_offset);
+    offset = (offset + 1).min(max_offset);
+    offset = offset.saturating_sub(1);
+    offset == 1
+}
+
+fn run_editor_roundtrip_probe(path: &Path) -> Result<()> {
+    let status = ProcessCommand::new("sh")
+        .arg("-lc")
+        .arg(format!("true {}", shell_escape_path(path)))
+        .status()?;
+    if !status.success() {
+        bail!("editor roundtrip probe failed with status: {status}");
+    }
+    Ok(())
+}
+
+fn shell_escape_path(path: &Path) -> String {
+    let raw = path.to_string_lossy();
+    format!("'{}'", raw.replace('\'', r#"'"'"'"#))
+}
+
+fn run_optional_sftp_smoke() -> Result<(bool, bool, f64)> {
+    let Some(conn) = sftp_smoke_connection_from_env() else {
+        return Ok((false, true, 0.0));
+    };
+
+    let started = Instant::now();
+    let backend = backend_from_spec(&BackendSpec::Sftp(conn.clone()));
+    let root = conn.root_path.clone();
+    let _ = backend.list_dir(root.as_path(), SortMode::Name, true)?;
+
+    let probe_dir = root.join(format!(
+        ".vcmc-smoke-{}",
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis()
+    ));
+    backend.create_dir(probe_dir.as_path())?;
+
+    let probe_file = probe_dir.join("probe.txt");
+    let payload = b"vcmc-sftp-smoke";
+    backend.write_file(probe_file.as_path(), payload)?;
+    let roundtrip = backend.read_file(probe_file.as_path())?;
+    if roundtrip.as_slice() != payload {
+        bail!("sftp smoke roundtrip mismatch");
+    }
+    backend.remove_path(probe_file.as_path())?;
+    backend.remove_path(probe_dir.as_path())?;
+
+    Ok((true, true, started.elapsed().as_secs_f64() * 1_000.0))
+}
+
+fn sftp_smoke_connection_from_env() -> Option<SftpConnectionInfo> {
+    let host = env::var("VCMC_SFTP_SMOKE_HOST").ok()?;
+    let user = env::var("VCMC_SFTP_SMOKE_USER").ok()?;
+    let root_path = env::var("VCMC_SFTP_SMOKE_ROOT")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/"));
+    let port = env::var("VCMC_SFTP_SMOKE_PORT")
+        .ok()
+        .and_then(|value| value.parse::<u16>().ok())
+        .unwrap_or(22);
+
+    let auth = match env::var("VCMC_SFTP_SMOKE_AUTH")
+        .unwrap_or_else(|_| "agent".to_string())
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "agent" => SftpAuth::Agent,
+        "password" => SftpAuth::Password(env::var("VCMC_SFTP_SMOKE_PASSWORD").ok()?),
+        "key" => SftpAuth::KeyFile {
+            path: PathBuf::from(env::var("VCMC_SFTP_SMOKE_KEY").ok()?),
+            passphrase: env::var("VCMC_SFTP_SMOKE_PASSPHRASE").ok(),
+        },
+        _ => return None,
+    };
+
+    Some(SftpConnectionInfo {
+        host,
+        user,
+        port,
+        root_path,
+        auth,
+    })
 }
 
 fn wait_for_terminal_updates(

@@ -6,46 +6,112 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::model::{
-    AppState, DialogButton, DialogButtonRole, DialogState, DialogTone, FsEntry, FsEntryType,
-    PanelId, PanelState, SortMode,
+    AppState, BatchProgressState, CommandLineState, DialogButtonRole, DialogState, DialogTone,
+    FsEntry, FsEntryType, JobKind, PanelId, PanelState, ScreenMode, SortMode, ViewerState,
 };
+use crate::theme::{DirColorsTheme, ThemeColor, ThemeStyle};
 
 const COL_SEP: &str = "│";
 
-pub fn render(frame: &mut Frame, state: &AppState) {
+pub fn render(frame: &mut Frame, state: &AppState, theme: &DirColorsTheme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
+        .constraints([
+            Constraint::Min(1),
+            Constraint::Length(1),
+            Constraint::Length(1),
+        ])
         .split(frame.area());
 
-    let panel_chunks = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[0]);
+    if state.screen_mode == ScreenMode::Viewer {
+        render_viewer(frame, chunks[0], state.viewer.as_ref());
+    } else {
+        let panel_chunks = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+            .split(chunks[0]);
 
-    render_panel(
-        frame,
-        panel_chunks[0],
-        "Left",
-        &state.left_panel,
-        state.active_panel == PanelId::Left,
-    );
-    render_panel(
-        frame,
-        panel_chunks[1],
-        "Right",
-        &state.right_panel,
-        state.active_panel == PanelId::Right,
-    );
+        render_panel(
+            frame,
+            panel_chunks[0],
+            "Left",
+            &state.left_panel,
+            state.active_panel == PanelId::Left,
+            theme,
+        );
+        render_panel(
+            frame,
+            panel_chunks[1],
+            "Right",
+            &state.right_panel,
+            state.active_panel == PanelId::Right,
+            theme,
+        );
+    }
 
     render_footer(frame, chunks[1], state);
+    render_command_line(frame, chunks[2], &state.command_line);
+
+    if let Some(progress) = state.batch_progress.as_ref() {
+        render_batch_progress_overlay(frame, progress);
+    }
 
     if let Some(dialog) = &state.dialog {
         render_dialog(frame, dialog);
     }
 }
 
-fn render_panel(frame: &mut Frame, area: Rect, name: &str, panel: &PanelState, active: bool) {
+fn render_command_line(frame: &mut Frame, area: Rect, command_line: &CommandLineState) {
+    let prompt = ":";
+    let input = if command_line.active {
+        format!("{}{}|", prompt, command_line.input)
+    } else if command_line.input.is_empty() {
+        ": (press : to command)".to_string()
+    } else {
+        format!("{prompt}{}", command_line.input)
+    };
+
+    let style = if command_line.active {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::LightGreen)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::Gray).bg(Color::Black)
+    };
+
+    let text = fit_footer_cell_text(input.as_str(), area.width as usize);
+    frame.render_widget(Paragraph::new(Line::styled(text, style)), area);
+}
+
+fn render_viewer(frame: &mut Frame, area: Rect, viewer: Option<&ViewerState>) {
+    let block = Block::default()
+        .title(viewer_title(viewer))
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let lines = build_viewer_lines(viewer, inner);
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
+fn render_panel(
+    frame: &mut Frame,
+    area: Rect,
+    name: &str,
+    panel: &PanelState,
+    active: bool,
+    theme: &DirColorsTheme,
+) {
     let border_style = if active {
         Style::default()
             .fg(Color::Yellow)
@@ -89,12 +155,17 @@ fn render_panel(frame: &mut Frame, area: Rect, name: &str, panel: &PanelState, a
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let lines = build_entry_lines(panel, active, inner);
+    let lines = build_entry_lines(panel, active, inner, theme);
     let content = Paragraph::new(lines);
     frame.render_widget(content, inner);
 }
 
-fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec<Line<'static>> {
+fn build_entry_lines(
+    panel: &PanelState,
+    panel_active: bool,
+    inner: Rect,
+    theme: &DirColorsTheme,
+) -> Vec<Line<'static>> {
     let capacity = inner.height as usize;
     let total_width = inner.width as usize;
     if capacity <= 1 || total_width == 0 {
@@ -159,7 +230,7 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
                         truncate_name(&name, name_width),
                         name_width = name_width
                     ),
-                    base_style.patch(type_style(entry)),
+                    base_style.patch(type_style(entry, theme)),
                 ));
                 spans.push(Span::styled(COL_SEP, base_style));
                 spans.push(Span::styled(
@@ -190,7 +261,7 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
                         truncate_name(&name, name_width),
                         name_width = name_width
                     ),
-                    base_style.patch(type_style(entry)),
+                    base_style.patch(type_style(entry, theme)),
                 ));
                 spans.push(Span::styled(COL_SEP, base_style));
                 spans.push(Span::styled(
@@ -209,7 +280,7 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
                         truncate_name(&name, name_width),
                         name_width = name_width
                     ),
-                    base_style.patch(type_style(entry)),
+                    base_style.patch(type_style(entry, theme)),
                 ));
             }
         }
@@ -237,38 +308,40 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
         PanelId::Right => &state.right_panel,
     };
     let mode = footer_mode(state, active_panel);
-
-    let mut spans = vec![Span::styled(
-        format!("[{}] ", footer_mode_label(mode)),
-        Style::default()
-            .fg(Color::Black)
-            .bg(Color::White)
-            .add_modifier(Modifier::BOLD),
-    )];
-
-    for button in build_footer_buttons(state, active_panel, mode) {
-        let style = if !button.enabled {
-            Style::default().fg(Color::DarkGray)
-        } else if button.active {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Yellow)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::White).bg(Color::DarkGray)
-        };
-        spans.push(Span::styled(
-            format!("[{} {}] ", button.key, button.label),
-            style,
-        ));
+    let buttons = build_footer_buttons(state, active_panel, mode);
+    let mut cells = Vec::with_capacity(buttons.len() + 1);
+    cells.push(FooterCellSpec {
+        text: footer_mode_label(mode).to_string(),
+        kind: FooterCellKind::Mode,
+        enabled: true,
+        active: false,
+    });
+    for button in buttons {
+        cells.push(FooterCellSpec {
+            text: footer_button_label(button.key.as_str(), button.label.as_str()),
+            kind: FooterCellKind::Button,
+            enabled: button.enabled,
+            active: button.active,
+        });
+    }
+    if mode == FooterMode::Viewer {
+        cells.push(FooterCellSpec {
+            text: viewer_status_label(state.viewer.as_ref()),
+            kind: FooterCellKind::Status,
+            enabled: true,
+            active: false,
+        });
     }
 
+    let spans = build_footer_spans(&cells, area.width as usize);
     let footer = Paragraph::new(Line::from(spans));
     frame.render_widget(footer, area);
 }
 
 fn footer_mode(state: &AppState, panel: &PanelState) -> FooterMode {
-    if state.dialog.is_some() {
+    if state.screen_mode == ScreenMode::Viewer {
+        FooterMode::Viewer
+    } else if state.dialog.is_some() {
         FooterMode::Dialog
     } else if !panel.selected_paths.is_empty() {
         FooterMode::Selection
@@ -282,6 +355,7 @@ fn footer_mode_label(mode: FooterMode) -> &'static str {
         FooterMode::Normal => "NORMAL",
         FooterMode::Selection => "SELECTION",
         FooterMode::Dialog => "DIALOG",
+        FooterMode::Viewer => "VIEWER",
     }
 }
 
@@ -295,31 +369,41 @@ fn build_footer_buttons(
             let current_entry_operable = panel
                 .selected_entry()
                 .is_some_and(|entry| !entry.is_virtual);
+            let current_entry_viewable = panel.selected_entry().is_some_and(|entry| {
+                !entry.is_virtual && entry.entry_type != FsEntryType::Directory
+            });
+            let current_entry_editable = current_entry_viewable;
             vec![
                 FooterButtonSpec::new("F1", "Help", false, false),
                 FooterButtonSpec::new("F2", "Sort", true, false),
-                FooterButtonSpec::new("F3", "View", false, false),
-                FooterButtonSpec::new("F4", "Edit", false, false),
+                FooterButtonSpec::new("F3", "View", current_entry_viewable, false),
+                FooterButtonSpec::new("F4", "Edit", current_entry_editable, false),
                 FooterButtonSpec::new("F5", "Copy", current_entry_operable, false),
                 FooterButtonSpec::new("F6", "Move", current_entry_operable, false),
                 FooterButtonSpec::new("F7", "Mkdir", true, false),
                 FooterButtonSpec::new("F8", "Delete", current_entry_operable, false),
-                FooterButtonSpec::new("F9", "Menu", false, false),
+                FooterButtonSpec::new("F9", "SFTP", true, false),
                 FooterButtonSpec::new("F10", "Quit", true, false),
             ]
         }
-        FooterMode::Selection => vec![
-            FooterButtonSpec::new("F1", "Help", false, false),
-            FooterButtonSpec::new("F2", "Sort", true, false),
-            FooterButtonSpec::new("F3", "View", false, false),
-            FooterButtonSpec::new("F4", "Edit", false, false),
-            FooterButtonSpec::new("F5", "Copy", true, true),
-            FooterButtonSpec::new("F6", "Move", true, true),
-            FooterButtonSpec::new("F7", "Mkdir", true, false),
-            FooterButtonSpec::new("F8", "Delete", true, true),
-            FooterButtonSpec::new("F9", "Menu", false, false),
-            FooterButtonSpec::new("F10", "Quit", true, false),
-        ],
+        FooterMode::Selection => {
+            let current_entry_viewable = panel.selected_entry().is_some_and(|entry| {
+                !entry.is_virtual && entry.entry_type != FsEntryType::Directory
+            });
+            let current_entry_editable = current_entry_viewable;
+            vec![
+                FooterButtonSpec::new("F1", "Help", false, false),
+                FooterButtonSpec::new("F2", "Sort", true, false),
+                FooterButtonSpec::new("F3", "View", current_entry_viewable, false),
+                FooterButtonSpec::new("F4", "Edit", current_entry_editable, false),
+                FooterButtonSpec::new("F5", "Copy", true, true),
+                FooterButtonSpec::new("F6", "Move", true, true),
+                FooterButtonSpec::new("F7", "Mkdir", true, false),
+                FooterButtonSpec::new("F8", "Delete", true, true),
+                FooterButtonSpec::new("F9", "SFTP", true, false),
+                FooterButtonSpec::new("F10", "Quit", true, false),
+            ]
+        }
         FooterMode::Dialog => {
             let mut buttons = vec![
                 FooterButtonSpec::new("Tab", "Next", true, false),
@@ -361,14 +445,25 @@ fn build_footer_buttons(
 
             buttons
         }
+        FooterMode::Viewer => vec![
+            FooterButtonSpec::new("F3", "Close", true, false),
+            FooterButtonSpec::new("Esc", "Close", true, false),
+            FooterButtonSpec::new("Up", "Scroll", true, false),
+            FooterButtonSpec::new("Down", "Scroll", true, false),
+            FooterButtonSpec::new("PgUp", "PageUp", true, false),
+            FooterButtonSpec::new("PgDn", "PageDn", true, false),
+            FooterButtonSpec::new("Home", "Top", true, false),
+            FooterButtonSpec::new("End", "Bottom", true, false),
+        ],
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum FooterMode {
     Normal,
     Selection,
     Dialog,
+    Viewer,
 }
 
 struct FooterButtonSpec {
@@ -385,6 +480,107 @@ impl FooterButtonSpec {
             label: label.to_string(),
             enabled,
             active,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FooterCellKind {
+    Mode,
+    Button,
+    Status,
+}
+
+struct FooterCellSpec {
+    text: String,
+    kind: FooterCellKind,
+    enabled: bool,
+    active: bool,
+}
+
+fn build_footer_spans(cells: &[FooterCellSpec], total_width: usize) -> Vec<Span<'static>> {
+    if cells.is_empty() || total_width == 0 {
+        return Vec::new();
+    }
+
+    let widths = distribute_width(total_width, cells.len());
+    let mut spans = Vec::with_capacity(cells.len());
+    for (cell, width) in cells.iter().zip(widths.into_iter()) {
+        if width == 0 {
+            continue;
+        }
+        let text = fit_footer_cell_text(cell.text.as_str(), width);
+        spans.push(Span::styled(text, footer_cell_style(cell)));
+    }
+    spans
+}
+
+fn footer_button_label(key: &str, label: &str) -> String {
+    format!("{key} {}", abbreviate_footer_label(label))
+}
+
+fn abbreviate_footer_label(label: &str) -> String {
+    match label {
+        "Selection" => "Select".to_string(),
+        "PageUp" => "PgUp".to_string(),
+        "PageDn" => "PgDn".to_string(),
+        "Left/Right" => "L/R".to_string(),
+        "S-Tab" => "ShiftTab".to_string(),
+        _ => label.to_string(),
+    }
+}
+
+fn fit_footer_cell_text(text: &str, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+    let mut value = truncate_name(text, width);
+    let len = value.chars().count();
+    if len >= width {
+        return value;
+    }
+    let right_padding = width - len;
+    value.push_str(&" ".repeat(right_padding));
+    value
+}
+
+fn distribute_width(total_width: usize, cells: usize) -> Vec<usize> {
+    if cells == 0 {
+        return Vec::new();
+    }
+    let base = total_width / cells;
+    let rem = total_width % cells;
+    let mut widths = Vec::with_capacity(cells);
+    for idx in 0..cells {
+        widths.push(base + usize::from(idx < rem));
+    }
+    widths
+}
+
+fn footer_cell_style(cell: &FooterCellSpec) -> Style {
+    match cell.kind {
+        FooterCellKind::Mode => Style::default()
+            .fg(Color::Black)
+            .bg(Color::White)
+            .add_modifier(Modifier::BOLD),
+        FooterCellKind::Status => Style::default()
+            .fg(Color::Cyan)
+            .bg(Color::Blue)
+            .add_modifier(Modifier::BOLD),
+        FooterCellKind::Button => {
+            if !cell.enabled {
+                Style::default().fg(Color::DarkGray).bg(Color::Blue)
+            } else if cell.active {
+                Style::default()
+                    .fg(Color::Black)
+                    .bg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default()
+                    .fg(Color::White)
+                    .bg(Color::Blue)
+                    .add_modifier(Modifier::BOLD)
+            }
         }
     }
 }
@@ -433,12 +629,17 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
 
     let button_row_idx = if let Some(value) = dialog.input_value.as_ref() {
         let label = input_label(dialog);
+        let visible_value = if dialog.mask_input {
+            "*".repeat(value.chars().count())
+        } else {
+            value.clone()
+        };
         let input_block = Block::default()
             .title(label)
             .borders(Borders::ALL)
             .border_style(Style::default().fg(Color::Yellow));
         let input = Paragraph::new(Line::styled(
-            format!("{value}|"),
+            format!("{visible_value}|"),
             Style::default()
                 .fg(Color::White)
                 .add_modifier(Modifier::BOLD),
@@ -454,6 +655,71 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
     frame.render_widget(buttons, chunks[button_row_idx]);
 }
 
+fn render_batch_progress_overlay(frame: &mut Frame, progress: &BatchProgressState) {
+    let area = centered_rect(62, 8, frame.area());
+    frame.render_widget(Clear, area);
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(format!("Progress #{}", progress.batch_id))
+        .border_style(
+            Style::default()
+                .fg(Color::LightBlue)
+                .add_modifier(Modifier::BOLD),
+        );
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let completed = progress.completed.min(progress.total);
+    let total = progress.total.max(1);
+    let percent = (completed * 100) / total;
+    let bar_width = inner.width.saturating_sub(8) as usize;
+    let filled = (bar_width * completed) / total;
+    let progress_bar = format!(
+        "[{}{}] {:>3}%",
+        "=".repeat(filled),
+        "-".repeat(bar_width.saturating_sub(filled)),
+        percent
+    );
+    let current_file = truncate_name(progress.current_file.as_str(), inner.width as usize);
+    let lines = vec![
+        Line::from(vec![
+            Span::styled(
+                "Operation: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(operation_label(progress.operation)),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "Current file: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(current_file),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "Files: ",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!(
+                "{}/{}  failed: {}",
+                completed, progress.total, progress.failed
+            )),
+        ]),
+        Line::styled(progress_bar, Style::default().fg(Color::Green)),
+    ];
+    frame.render_widget(Paragraph::new(lines), inner);
+}
+
 fn render_button_row(dialog: &DialogState) -> Line<'static> {
     let mut spans = Vec::new();
 
@@ -463,7 +729,7 @@ fn render_button_row(dialog: &DialogState) -> Line<'static> {
         }
 
         let is_focused = idx == dialog.focused_button;
-        let label = button_label(button);
+        let label = button.label.as_str();
         let style = if is_focused {
             Style::default()
                 .fg(Color::Black)
@@ -482,33 +748,60 @@ fn render_button_row(dialog: &DialogState) -> Line<'static> {
     Line::from(spans)
 }
 
-fn button_label(button: &DialogButton) -> String {
-    match button.accelerator {
-        Some(accel) => format!("Alt+{} {}", accel.to_ascii_uppercase(), button.label),
-        None => button.label.clone(),
-    }
-}
-
 fn input_label(dialog: &DialogState) -> &'static str {
     let title = dialog.title.to_ascii_lowercase();
     if title.contains("mask") {
         "Mask"
+    } else if title.contains("sftp connect") {
+        "Address"
+    } else if title.contains("sftp") && title.contains("address") {
+        "Address"
+    } else if title.contains("sftp") && title.contains("login") {
+        "Login"
+    } else if title.contains("sftp") && title.contains("password") {
+        "Password"
+    } else if title.contains("sftp") && title.contains("key") {
+        "Key Path"
     } else {
         "Name"
     }
 }
 
-fn type_style(entry: &FsEntry) -> Style {
-    if entry.is_virtual {
-        return Style::default()
-            .fg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
-    }
+fn type_style(entry: &FsEntry, theme: &DirColorsTheme) -> Style {
+    theme_style_to_ratatui(theme.style_for_entry(entry))
+}
 
-    match entry.entry_type {
-        FsEntryType::Directory => Style::default().fg(Color::Blue),
-        FsEntryType::Symlink => Style::default().fg(Color::Magenta),
-        _ => Style::default(),
+fn theme_style_to_ratatui(style: ThemeStyle) -> Style {
+    let mut ratatui_style = Style::default();
+    if let Some(color) = style.fg {
+        ratatui_style = ratatui_style.fg(theme_color_to_ratatui(color));
+    }
+    if style.bold {
+        ratatui_style = ratatui_style.add_modifier(Modifier::BOLD);
+    }
+    ratatui_style
+}
+
+fn theme_color_to_ratatui(color: ThemeColor) -> Color {
+    match color {
+        ThemeColor::Black => Color::Black,
+        ThemeColor::Red => Color::Red,
+        ThemeColor::Green => Color::Green,
+        ThemeColor::Yellow => Color::Yellow,
+        ThemeColor::Blue => Color::Blue,
+        ThemeColor::Magenta => Color::Magenta,
+        ThemeColor::Cyan => Color::Cyan,
+        ThemeColor::White => Color::White,
+        ThemeColor::BrightBlack => Color::DarkGray,
+        ThemeColor::BrightRed => Color::LightRed,
+        ThemeColor::BrightGreen => Color::LightGreen,
+        ThemeColor::BrightYellow => Color::LightYellow,
+        ThemeColor::BrightBlue => Color::LightBlue,
+        ThemeColor::BrightMagenta => Color::LightMagenta,
+        ThemeColor::BrightCyan => Color::LightCyan,
+        ThemeColor::BrightWhite => Color::Gray,
+        ThemeColor::Indexed(value) => Color::Indexed(value),
+        ThemeColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
     }
 }
 
@@ -778,6 +1071,85 @@ fn format_modified_at(entry: &FsEntry) -> String {
     dt.format("%Y-%m-%d %H:%M").to_string()
 }
 
+fn viewer_title(viewer: Option<&ViewerState>) -> String {
+    match viewer {
+        Some(state) => format!(
+            "Viewer [{}|{}] {}",
+            state.title,
+            if state.is_binary_like {
+                "binary-like"
+            } else {
+                "text"
+            },
+            state.path.display()
+        ),
+        None => "Viewer".to_string(),
+    }
+}
+
+fn viewer_status_label(viewer: Option<&ViewerState>) -> String {
+    match viewer {
+        Some(state) => {
+            let total_lines = state.lines.len();
+            let current_offset = state.scroll_offset.min(total_lines.saturating_sub(1));
+            format!(
+                "off:{current_offset} lines:{total_lines} bytes:{} mode:{}",
+                human_size(state.byte_size),
+                if state.is_binary_like {
+                    "binary-like"
+                } else {
+                    "text"
+                }
+            )
+        }
+        None => "off:0 lines:0 bytes:0B mode:text".to_string(),
+    }
+}
+
+fn operation_label(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::Copy => "Copy",
+        JobKind::Move => "Move",
+        JobKind::Delete => "Delete",
+        JobKind::Mkdir => "Mkdir",
+    }
+}
+
+fn build_viewer_lines(viewer: Option<&ViewerState>, area: Rect) -> Vec<Line<'static>> {
+    let capacity = area.height as usize;
+    if capacity == 0 {
+        return Vec::new();
+    }
+
+    let Some(viewer) = viewer else {
+        return vec![Line::styled(
+            "Viewer state is unavailable.",
+            Style::default().fg(Color::Red),
+        )];
+    };
+
+    if viewer.lines.is_empty() {
+        return vec![Line::styled(
+            "File is empty.",
+            Style::default().fg(Color::DarkGray),
+        )];
+    }
+
+    let start = viewer
+        .scroll_offset
+        .min(viewer.lines.len().saturating_sub(1));
+    let end = (start + capacity).min(viewer.lines.len());
+    let mut lines = Vec::with_capacity(capacity);
+    for line in viewer.lines[start..end].iter().cloned() {
+        lines.push(Line::from(line));
+    }
+    while lines.len() < capacity {
+        lines.push(Line::from(String::new()));
+    }
+
+    lines
+}
+
 fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -800,7 +1172,7 @@ fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
 
 #[cfg(test)]
 mod tests {
-    use super::{TableLayout, fixed_table_layout};
+    use super::{TableLayout, distribute_width, fit_footer_cell_text, fixed_table_layout};
 
     #[test]
     fn fixed_table_layout_switches_modes_for_narrow_widths() {
@@ -821,6 +1193,24 @@ mod tests {
                 "layout width exceeds panel width: panel={width}, layout={}",
                 layout_total_width(layout)
             );
+        }
+    }
+
+    #[test]
+    fn footer_width_distribution_always_matches_target() {
+        for width in 1usize..=220 {
+            for cells in 1usize..=16 {
+                let widths = distribute_width(width, cells);
+                assert_eq!(widths.iter().sum::<usize>(), width);
+            }
+        }
+    }
+
+    #[test]
+    fn footer_text_fits_cell_width() {
+        for width in 1usize..=24 {
+            let text = fit_footer_cell_text("F10 VeryLongLabel", width);
+            assert_eq!(text.chars().count(), width);
         }
     }
 

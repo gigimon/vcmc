@@ -9,6 +9,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock"] }
 crossbeam-channel = "0.5"
 crossterm = "0.28"
 ratatui = "0.29"
+ssh2 = { version = "0.9", features = ["vendored-openssl"] }
 thiserror = "1.0"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

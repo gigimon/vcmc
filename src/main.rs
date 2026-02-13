@@ -1,4 +1,5 @@
 mod app;
+mod backend;
 mod errors;
 mod fs;
 mod jobs;
@@ -6,7 +7,9 @@ mod model;
 mod runtime;
 mod smoke;
 mod terminal;
+mod theme;
 mod ui;
+mod viewer;
 
 use std::env;
 use std::time::Duration;
@@ -32,12 +35,12 @@ fn main() -> Result<()> {
     let (mut terminal, mut guard) = terminal::init_terminal()?;
     let runtime_handle = runtime::spawn_event_pump(event_tx, Duration::from_millis(150));
 
-    terminal.draw(|frame| ui::render(frame, app.state()))?;
+    terminal.draw(|frame| ui::render(frame, app.state(), app.theme()))?;
 
     while app.is_running() {
         let event = event_rx.recv()?;
         if app.on_event(event) {
-            terminal.draw(|frame| ui::render(frame, app.state()))?;
+            terminal.draw(|frame| ui::render(frame, app.state(), app.theme()))?;
         }
     }
 

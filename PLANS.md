@@ -171,40 +171,40 @@ MVP-функции (итерация 1):
 # Implementation (итерация 3)
 
 ## Step 17: Viewer Mode и доменная модель
-[] Добавить режим экрана `Viewer` в `AppState` (normal/viewer) и структуру `ViewerState`.
-[] В `ViewerState` хранить: `path`, `title`, `lines`, `scroll_offset`, `is_binary_like`, `byte_size`.
-[] Ввести команды/события для `F3`, закрытия viewer (`Esc/F3/q`) и вертикального скролла.
-[] Гарантировать, что переход в viewer не ломает выделения/позицию в панели при возврате.
+[x] Добавить режим экрана `Viewer` в `AppState` (normal/viewer) и структуру `ViewerState`.
+[x] В `ViewerState` хранить: `path`, `title`, `lines`, `scroll_offset`, `is_binary_like`, `byte_size`.
+[x] Ввести команды/события для `F3`, закрытия viewer (`Esc/F3/q`) и вертикального скролла.
+[x] Гарантировать, что переход в viewer не ломает выделения/позицию в панели при возврате.
 
 ## Step 18: Загрузка контента и smart fallback
-[] Реализовать `viewer_loader`: чтение файла с верхним лимитом (например 256 KB для preview).
-[] Добавить эвристику binary-like (NUL-байты/доля непечатаемых символов).
-[] Для текста: нормализация строк и табов, безопасное ограничение длины строки.
-[] Для binary-like: показывать metadata + lossy-предпросмотр первых N KB.
+[x] Реализовать `viewer_loader`: чтение файла с верхним лимитом (например 256 KB для preview).
+[x] Добавить эвристику binary-like (NUL-байты/доля непечатаемых символов).
+[x] Для текста: нормализация строк и табов, безопасное ограничение длины строки.
+[x] Для binary-like: показывать metadata + lossy-предпросмотр первых N KB.
 
 ## Step 19: UI и управление fullscreen viewer (`F3`)
-[] Реализовать fullscreen-рендер viewer с header/body/footer hotkeys.
-[] Управление: `Up/Down`, `PgUp/PgDn`, `Home/End`, `Esc/F3` для выхода.
-[] Поддержать статус внизу viewer (offset, total lines/bytes, mode text/binary-like).
-[] Добавить обработку ошибок загрузки (permission denied, not found, read failure).
+[x] Реализовать fullscreen-рендер viewer с header/body/footer hotkeys.
+[x] Управление: `Up/Down`, `PgUp/PgDn`, `Home/End`, `Esc/F3` для выхода.
+[x] Поддержать статус внизу viewer (offset, total lines/bytes, mode text/binary-like).
+[x] Добавить обработку ошибок загрузки (permission denied, not found, read failure).
 
 ## Step 20: Интеграция внешнего редактора (`F4`)
-[] Реализовать запуск `$EDITOR <current_file>` с временным выходом из alternate screen.
-[] После завершения editor корректно вернуть raw mode/alternate screen и redraw.
-[] Добавить fallback, если `$EDITOR` не задан (alert + подсказка).
-[] Обновлять панель после возврата из editor (mtime/size/имя).
+[x] Реализовать запуск `$EDITOR <current_file>` с временным выходом из alternate screen.
+[x] После завершения editor корректно вернуть raw mode/alternate screen и redraw.
+[x] Добавить fallback, если `$EDITOR` не задан (alert + подсказка).
+[x] Обновлять панель после возврата из editor (mtime/size/имя).
 
 ## Step 21: Полировка viewer/editor и документация
-[] Smoke-сценарий: `F3` на текстовом и binary-like файле + базовый скролл.
-[] Smoke-сценарий: `F4` roundtrip (запуск editor, возврат в TUI, refresh панели).
-[] Обновить README: хоткеи viewer/editor и ограничения smart fallback.
-[] Зафиксировать Known UX constraints и backlog следующего этапа (hex-mode, search in viewer, internal editor).
+[x] Smoke-сценарий: `F3` на текстовом и binary-like файле + базовый скролл.
+[x] Smoke-сценарий: `F4` roundtrip (запуск editor, возврат в TUI, refresh панели).
+[x] Обновить README: хоткеи viewer/editor и ограничения smart fallback.
+[x] Зафиксировать Known UX constraints и backlog следующего этапа (hex-mode, search in viewer, internal editor).
 
 # Definition of Done (итерация 3)
-[] `F3` открывает fullscreen viewer без деградации UX панелей.
-[] Smart fallback корректно различает текст и binary-like и показывает понятный результат.
-[] `F4` через `$EDITOR` надежно возвращает пользователя обратно в TUI.
-[] Документация и smoke-сценарии покрывают новый workflow просмотра/редактирования.
+[x] `F3` открывает fullscreen viewer без деградации UX панелей.
+[x] Smart fallback корректно различает текст и binary-like и показывает понятный результат.
+[x] `F4` через `$EDITOR` надежно возвращает пользователя обратно в TUI.
+[x] Документация и smoke-сценарии покрывают новый workflow просмотра/редактирования.
 
 # Description (итерация 4)
 Цель: приблизить UX к классическому MC в части информативности операций и расширить менеджер до локально-удаленной работы (SFTP).
@@ -224,37 +224,37 @@ MVP-функции (итерация 1):
 # Implementation (итерация 4)
 
 ## Step 22: MC-like progress UI для batch операций
-[] Расширить `JobUpdate`/batch агрегатор: передавать текущий файл и прогресс по элементам пачки.
-[] Добавить прогресс-панель/оверлей в стиле MC: `Operation`, `Current file`, `Files: N/M`.
-[] Для delete/copy/move показывать общий прогресс и текущий элемент в реальном времени.
-[] Сохранить неблокирующий UI и корректное завершение/сброс состояния progress.
+[x] Расширить `JobUpdate`/batch агрегатор: передавать текущий файл и прогресс по элементам пачки.
+[x] Добавить прогресс-панель/оверлей в стиле MC: `Operation`, `Current file`, `Files: N/M`.
+[x] Для delete/copy/move показывать общий прогресс и текущий элемент в реальном времени.
+[x] Сохранить неблокирующий UI и корректное завершение/сброс состояния progress.
 
 ## Step 23: Footer-кнопки на всю ширину (adaptive MC style)
-[] Переработать footer в адаптивную full-width сетку с "кнопочным" видом.
-[] Добавить динамический layout для длинных подписей (`truncate`, `abbrev`) без дрожания геометрии.
-[] Обновить context sets (`Normal/Selection/Dialog/Viewer`) для новой сетки.
-[] Подсветить active/disabled/pressed состояния визуально ближе к MC.
+[x] Переработать footer в адаптивную full-width сетку с "кнопочным" видом.
+[x] Добавить динамический layout для длинных подписей (`truncate`, `abbrev`) без дрожания геометрии.
+[x] Обновить context sets (`Normal/Selection/Dialog/Viewer`) для новой сетки.
+[x] Подсветить active/disabled/pressed состояния визуально ближе к MC.
 
 ## Step 24: Темы и подсветка расширений через `dircolors`
-[] Добавить парсер `dircolors` (основные токены: `DIR`, `LINK`, `EXEC`, `*.ext`, `RESET`).
-[] Построить маппинг `dircolors -> ratatui::Style` с fallback-темой по умолчанию.
-[] Применить расширенную раскраску в таблице файлов (по типу и расширению).
-[] Добавить hot-reload или reload по команде для теста тем в runtime.
+[x] Добавить парсер `dircolors` (основные токены: `DIR`, `LINK`, `EXEC`, `*.ext`, `RESET`).
+[x] Построить маппинг `dircolors -> ratatui::Style` с fallback-темой по умолчанию.
+[x] Применить расширенную раскраску в таблице файлов (по типу и расширению).
+[x] Добавить hot-reload или reload по команде для теста тем в runtime.
 
 ## Step 25: Backend-абстракция и нативный SFTP backend
-[] Ввести `FsBackend` abstraction (`LocalFs`, `SftpFs`) для панелей и операций.
-[] Реализовать `SftpFs` на Rust-библиотеке (`ssh2`/эквивалент): list/stat/read/write/mkdir/remove/rename.
-[] Добавить UI-флоу подключения: host/user/port/path + auth (agent/key/password).
-[] Поддержать копирование `local <-> sftp` и `sftp -> sftp` через существующую job-модель.
+[x] Ввести `FsBackend` abstraction (`LocalFs`, `SftpFs`) для панелей и операций.
+[x] Реализовать `SftpFs` на Rust-библиотеке (`ssh2`/эквивалент): list/stat/read/write/mkdir/remove/rename.
+[x] Добавить UI-флоу подключения: host/user/port/path + auth (agent/key/password).
+[x] Поддержать копирование `local <-> sftp` и `sftp -> sftp` через существующую job-модель.
 
 ## Step 26: Полировка сети, документация и smoke
-[] Добавить retry/timeout и понятные сетевые ошибки (auth/network/perm/path).
-[] Подготовить smoke-сценарии для progress UI и базовых SFTP операций на тестовом хосте.
-[] Обновить README: remote workflow, security notes, `dircolors`, progress controls.
-[] Зафиксировать ограничения v1 remote режима и backlog (resume, parallel transfers, bookmarks for hosts).
+[x] Добавить retry/timeout и понятные сетевые ошибки (auth/network/perm/path).
+[x] Подготовить smoke-сценарии для progress UI и базовых SFTP операций на тестовом хосте.
+[x] Обновить README: remote workflow, security notes, `dircolors`, progress controls.
+[x] Зафиксировать ограничения v1 remote режима и backlog (resume, parallel transfers, bookmarks for hosts).
 
 # Definition of Done (итерация 4)
-[] Пользователь видит понятный MC-like прогресс для batch операций (общий + текущий файл).
-[] Нижняя панель кнопок заполняет всю ширину экрана и остается читаемой в разных режимах.
-[] Подсветка файлов поддерживает `dircolors` и корректно деградирует при fallback.
-[] Работают подключение по SFTP и базовые операции/копирование между локальной и удаленной панелью.
+[x] Пользователь видит понятный MC-like прогресс для batch операций (общий + текущий файл).
+[x] Нижняя панель кнопок заполняет всю ширину экрана и остается читаемой в разных режимах.
+[x] Подсветка файлов поддерживает `dircolors` и корректно деградирует при fallback.
+[x] Работают подключение по SFTP и базовые операции/копирование между локальной и удаленной панелью.
