@@ -15,12 +15,7 @@ const COL_SEP: &str = "│";
 pub fn render(frame: &mut Frame, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
+        .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(frame.area());
 
     let panel_chunks = Layout::default()
@@ -43,9 +38,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         state.active_panel == PanelId::Right,
     );
 
-    render_status(frame, chunks[1], state);
-    render_log(frame, chunks[2], state);
-    render_footer(frame, chunks[3], state);
+    render_footer(frame, chunks[1], state);
 
     if let Some(dialog) = &state.dialog {
         render_dialog(frame, dialog);
@@ -224,32 +217,6 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
     lines
 }
 
-fn render_status(frame: &mut Frame, area: Rect, state: &AppState) {
-    let panel = match state.active_panel {
-        PanelId::Left => &state.left_panel,
-        PanelId::Right => &state.right_panel,
-    };
-    let (selected_count, selected_bytes) = panel.selection_summary();
-    let suffix = if selected_count == 0 {
-        " | sel:0".to_string()
-    } else {
-        format!(" | sel:{selected_count} ({})", human_size(selected_bytes))
-    };
-    let status = Paragraph::new(format!("{}{}", state.status_line, suffix))
-        .style(Style::default().fg(Color::White).bg(Color::DarkGray));
-    frame.render_widget(status, area);
-}
-
-fn render_log(frame: &mut Frame, area: Rect, state: &AppState) {
-    let latest = state
-        .activity_log
-        .last()
-        .map(String::as_str)
-        .unwrap_or("log: -");
-    let log = Paragraph::new(format!("log: {latest}")).style(Style::default().fg(Color::DarkGray));
-    frame.render_widget(log, area);
-}
-
 fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     let active_panel = match state.active_panel {
         PanelId::Left => &state.left_panel,
@@ -284,6 +251,33 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
 
     let footer = Paragraph::new(Line::from(spans));
     frame.render_widget(footer, area);
+
+    let (selected_count, selected_bytes) = active_panel.selection_summary();
+    if selected_count == 0 {
+        return;
+    }
+
+    let halves = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+    let (target_area, alignment) = match state.active_panel {
+        PanelId::Left => (halves[0], Alignment::Left),
+        PanelId::Right => (halves[1], Alignment::Right),
+    };
+
+    let selection_badge = Paragraph::new(format!(
+        " sel:{selected_count} ({}) ",
+        human_size(selected_bytes)
+    ))
+    .alignment(alignment)
+    .style(
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    );
+    frame.render_widget(selection_badge, target_area);
 }
 
 fn footer_mode(state: &AppState, panel: &PanelState) -> FooterMode {
