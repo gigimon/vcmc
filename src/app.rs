@@ -359,7 +359,10 @@ impl App {
         }
 
         let next_path = self.fs.normalize_existing_path("open", &entry.path)?;
-        self.active_panel_mut().cwd = next_path;
+        let panel = self.active_panel_mut();
+        panel.cwd = next_path;
+        panel.selected_index = 0;
+        panel.clear_selection_anchor();
         self.reload_panel(self.state.active_panel, true)
     }
 
@@ -370,7 +373,10 @@ impl App {
         };
 
         let normalized = self.fs.normalize_existing_path("parent", parent)?;
-        self.active_panel_mut().cwd = normalized;
+        let panel = self.active_panel_mut();
+        panel.cwd = normalized;
+        panel.selected_index = 0;
+        panel.clear_selection_anchor();
         self.reload_panel(self.state.active_panel, true)
     }
 
@@ -379,7 +385,10 @@ impl App {
             .map(PathBuf::from)
             .ok_or_else(|| anyhow::anyhow!("HOME environment variable is not set"))?;
         let normalized = self.fs.normalize_existing_path("home", &home)?;
-        self.active_panel_mut().cwd = normalized;
+        let panel = self.active_panel_mut();
+        panel.cwd = normalized;
+        panel.selected_index = 0;
+        panel.clear_selection_anchor();
         self.reload_panel(self.state.active_panel, true)
     }
 
