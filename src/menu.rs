@@ -16,7 +16,7 @@ pub enum MenuAction {
     PanelFindFd(PanelId),
     ToggleSort,
     Refresh,
-    ViewerModesPlanned,
+    ViewerModesInfo,
     EditorSettingsPlanned,
 }
 
@@ -79,7 +79,7 @@ const LEFT_ITEMS: [MenuItemSpec; 14] = [
 const OPTIONS_ITEMS: [MenuItemSpec; 4] = [
     MenuItemSpec::action("Sort", MenuAction::ToggleSort),
     MenuItemSpec::action("Refresh", MenuAction::Refresh),
-    MenuItemSpec::action("Viewer Modes", MenuAction::ViewerModesPlanned),
+    MenuItemSpec::action("Viewer Modes", MenuAction::ViewerModesInfo),
     MenuItemSpec::action("Editor Settings", MenuAction::EditorSettingsPlanned),
 ];
 

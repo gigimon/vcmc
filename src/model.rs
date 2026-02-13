@@ -309,14 +309,27 @@ pub enum ScreenMode {
     Viewer,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ViewerMode {
+    Text,
+    Hex,
+}
+
 #[derive(Debug, Clone)]
 pub struct ViewerState {
     pub path: PathBuf,
     pub title: String,
     pub lines: Vec<String>,
+    pub text_lines: Vec<String>,
+    pub hex_lines: Vec<String>,
     pub scroll_offset: usize,
     pub is_binary_like: bool,
     pub byte_size: u64,
+    pub mode: ViewerMode,
+    pub preview_truncated: bool,
+    pub search_query: String,
+    pub search_matches: Vec<usize>,
+    pub search_match_index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -450,6 +463,10 @@ pub enum Command {
     ViewerPageDown,
     ViewerTop,
     ViewerBottom,
+    ViewerToggleMode,
+    ViewerStartSearch,
+    ViewerSearchNext,
+    ViewerSearchPrev,
     OpenEditor,
     OpenSelected,
     GoToParent,

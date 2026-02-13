@@ -38,6 +38,14 @@ pub trait FsBackend: Send + Sync {
     fn normalize_existing_path(&self, operation: &'static str, path: &Path) -> Result<PathBuf>;
     fn normalize_new_path(&self, operation: &'static str, path: &Path) -> Result<PathBuf>;
     fn read_file(&self, path: &Path) -> Result<Vec<u8>>;
+    fn read_file_preview(&self, path: &Path, limit: usize) -> Result<(Vec<u8>, bool)> {
+        let mut bytes = self.read_file(path)?;
+        let truncated = bytes.len() > limit;
+        if truncated {
+            bytes.truncate(limit);
+        }
+        Ok((bytes, truncated))
+    }
     fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<()>;
 }
 
@@ -99,6 +107,19 @@ impl FsBackend for LocalFsBackend {
     fn read_file(&self, path: &Path) -> Result<Vec<u8>> {
         let normalized = self.fs.normalize_existing_path("read", path)?;
         Ok(fs::read(normalized)?)
+    }
+
+    fn read_file_preview(&self, path: &Path, limit: usize) -> Result<(Vec<u8>, bool)> {
+        let normalized = self.fs.normalize_existing_path("read", path)?;
+        let file = fs::File::open(normalized)?;
+        let mut reader = file.take((limit as u64) + 1);
+        let mut bytes = Vec::with_capacity(limit.min(16 * 1024));
+        reader.read_to_end(&mut bytes)?;
+        let truncated = bytes.len() > limit;
+        if truncated {
+            bytes.truncate(limit);
+        }
+        Ok((bytes, truncated))
     }
 
     fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<()> {
@@ -302,6 +323,20 @@ impl FsBackend for SftpFsBackend {
         Ok(buffer)
     }
 
+    fn read_file_preview(&self, path: &Path, limit: usize) -> Result<(Vec<u8>, bool)> {
+        let (_session, sftp) = self.connect()?;
+        let normalized = self.normalize_existing_path("read", path)?;
+        let mut file = sftp.open(normalized.as_path())?;
+        let mut reader = (&mut file).take((limit as u64) + 1);
+        let mut bytes = Vec::with_capacity(limit.min(16 * 1024));
+        reader.read_to_end(&mut bytes)?;
+        let truncated = bytes.len() > limit;
+        if truncated {
+            bytes.truncate(limit);
+        }
+        Ok((bytes, truncated))
+    }
+
     fn write_file(&self, path: &Path, bytes: &[u8]) -> Result<()> {
         let (_session, sftp) = self.connect()?;
         let normalized = self.normalize_new_path("write", path)?;
@@ -450,6 +485,27 @@ impl FsBackend for ArchiveFsBackend {
             normalized.as_path(),
             detect_archive_format(self.conn.archive_path.as_path())
                 .ok_or_else(|| anyhow::anyhow!("unsupported archive format"))?,
+        )
+    }
+
+    fn read_file_preview(&self, path: &Path, limit: usize) -> Result<(Vec<u8>, bool)> {
+        let normalized = self.normalize_existing_path("read", path)?;
+        let index = self.index()?;
+        let entry = index.entries.get(&normalized).ok_or_else(|| {
+            anyhow::anyhow!("path not found in archive: {}", normalized.display())
+        })?;
+        if entry.entry_type == FsEntryType::Directory {
+            bail!(
+                "cannot read directory from archive: {}",
+                normalized.display()
+            );
+        }
+        read_archive_member_preview(
+            self.conn.archive_path.as_path(),
+            normalized.as_path(),
+            detect_archive_format(self.conn.archive_path.as_path())
+                .ok_or_else(|| anyhow::anyhow!("unsupported archive format"))?,
+            limit,
         )
     }
 
@@ -696,6 +752,19 @@ fn read_archive_member(
     }
 }
 
+fn read_archive_member_preview(
+    archive_path: &Path,
+    member: &Path,
+    format: ArchiveFormat,
+    limit: usize,
+) -> Result<(Vec<u8>, bool)> {
+    match format {
+        ArchiveFormat::Zip => read_zip_member_preview(archive_path, member, limit),
+        ArchiveFormat::Tar => read_tar_member_preview(archive_path, member, false, limit),
+        ArchiveFormat::TarGz => read_tar_member_preview(archive_path, member, true, limit),
+    }
+}
+
 fn read_zip_member(archive_path: &Path, member: &Path) -> Result<Vec<u8>> {
     let file = fs::File::open(archive_path)?;
     let mut archive = ZipArchive::new(file)?;
@@ -713,6 +782,29 @@ fn read_zip_member(archive_path: &Path, member: &Path) -> Result<Vec<u8>> {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         return Ok(bytes);
+    }
+    bail!("archive member not found: {}", member.display())
+}
+
+fn read_zip_member_preview(
+    archive_path: &Path,
+    member: &Path,
+    limit: usize,
+) -> Result<(Vec<u8>, bool)> {
+    let file = fs::File::open(archive_path)?;
+    let mut archive = ZipArchive::new(file)?;
+    for idx in 0..archive.len() {
+        let mut file = archive.by_index(idx)?;
+        let Some(path) = archive_member_to_virtual_path(file.name()) else {
+            continue;
+        };
+        if path != member {
+            continue;
+        }
+        if file.is_dir() || file.name().ends_with('/') {
+            bail!("archive member is a directory: {}", member.display());
+        }
+        return read_with_limit(&mut file, limit);
     }
     bail!("archive member not found: {}", member.display())
 }
@@ -761,6 +853,64 @@ fn read_tar_member(archive_path: &Path, member: &Path, compressed: bool) -> Resu
         }
     }
     bail!("archive member not found: {}", member.display())
+}
+
+fn read_tar_member_preview(
+    archive_path: &Path,
+    member: &Path,
+    compressed: bool,
+    limit: usize,
+) -> Result<(Vec<u8>, bool)> {
+    if compressed {
+        let file = fs::File::open(archive_path)?;
+        let decoder = GzDecoder::new(file);
+        let mut archive = TarArchive::new(decoder);
+        for item in archive.entries()? {
+            let mut entry = item?;
+            let Some(path) =
+                archive_member_to_virtual_path(entry.path()?.to_string_lossy().as_ref())
+            else {
+                continue;
+            };
+            if path != member {
+                continue;
+            }
+            if entry.header().entry_type().is_dir() {
+                bail!("archive member is a directory: {}", member.display());
+            }
+            return read_with_limit(&mut entry, limit);
+        }
+    } else {
+        let file = fs::File::open(archive_path)?;
+        let mut archive = TarArchive::new(file);
+        for item in archive.entries()? {
+            let mut entry = item?;
+            let Some(path) =
+                archive_member_to_virtual_path(entry.path()?.to_string_lossy().as_ref())
+            else {
+                continue;
+            };
+            if path != member {
+                continue;
+            }
+            if entry.header().entry_type().is_dir() {
+                bail!("archive member is a directory: {}", member.display());
+            }
+            return read_with_limit(&mut entry, limit);
+        }
+    }
+    bail!("archive member not found: {}", member.display())
+}
+
+fn read_with_limit<R: Read>(reader: &mut R, limit: usize) -> Result<(Vec<u8>, bool)> {
+    let mut limited = reader.take((limit as u64) + 1);
+    let mut bytes = Vec::with_capacity(limit.min(16 * 1024));
+    limited.read_to_end(&mut bytes)?;
+    let truncated = bytes.len() > limit;
+    if truncated {
+        bytes.truncate(limit);
+    }
+    Ok((bytes, truncated))
 }
 
 fn archive_member_to_virtual_path(raw: &str) -> Option<PathBuf> {

@@ -9,7 +9,7 @@ use crate::menu::top_menu_groups;
 use crate::model::{
     AppState, BatchProgressState, CommandLineState, DialogButtonRole, DialogState, DialogTone,
     FindProgressState, FsEntry, FsEntryType, JobKind, PanelId, PanelState, ScreenMode, SortMode,
-    ViewerState,
+    ViewerMode, ViewerState,
 };
 use crate::theme::{DirColorsTheme, ThemeColor, ThemeStyle};
 
@@ -582,8 +582,12 @@ fn build_footer_buttons(
             buttons
         }
         FooterMode::Viewer => vec![
+            FooterButtonSpec::new("F2", "Mode", true, false),
             FooterButtonSpec::new("F3", "Close", true, false),
             FooterButtonSpec::new("Esc", "Close", true, false),
+            FooterButtonSpec::new("/", "Find", true, false),
+            FooterButtonSpec::new("n", "Next", true, false),
+            FooterButtonSpec::new("N", "Prev", true, false),
             FooterButtonSpec::new("Up", "Scroll", true, false),
             FooterButtonSpec::new("Down", "Scroll", true, false),
             FooterButtonSpec::new("PgUp", "PageUp", true, false),
@@ -1278,12 +1282,16 @@ fn format_modified_at(entry: &FsEntry) -> String {
 fn viewer_title(viewer: Option<&ViewerState>) -> String {
     match viewer {
         Some(state) => format!(
-            "Viewer [{}|{}] {}",
+            "Viewer [{}|{}{}] {}",
             state.title,
-            if state.is_binary_like {
-                "binary-like"
+            match state.mode {
+                ViewerMode::Text => "text",
+                ViewerMode::Hex => "hex",
+            },
+            if state.preview_truncated {
+                ",trunc"
             } else {
-                "text"
+                ""
             },
             state.path.display()
         ),
@@ -1296,14 +1304,24 @@ fn viewer_status_label(viewer: Option<&ViewerState>) -> String {
         Some(state) => {
             let total_lines = state.lines.len();
             let current_offset = state.scroll_offset.min(total_lines.saturating_sub(1));
-            format!(
-                "off:{current_offset} lines:{total_lines} bytes:{} mode:{}",
-                human_size(state.byte_size),
-                if state.is_binary_like {
-                    "binary-like"
+            let mode = match state.mode {
+                ViewerMode::Text => "text",
+                ViewerMode::Hex => "hex",
+            };
+            let match_status = if state.search_query.is_empty() {
+                "m:0/0".to_string()
+            } else {
+                let total = state.search_matches.len();
+                let current = if total == 0 {
+                    0
                 } else {
-                    "text"
-                }
+                    state.search_match_index + 1
+                };
+                format!("m:{current}/{total}")
+            };
+            format!(
+                "off:{current_offset} lines:{total_lines} bytes:{} mode:{mode} {match_status}",
+                human_size(state.byte_size),
             )
         }
         None => "off:0 lines:0 bytes:0B mode:text".to_string(),
@@ -1344,8 +1362,28 @@ fn build_viewer_lines(viewer: Option<&ViewerState>, area: Rect) -> Vec<Line<'sta
         .min(viewer.lines.len().saturating_sub(1));
     let end = (start + capacity).min(viewer.lines.len());
     let mut lines = Vec::with_capacity(capacity);
-    for line in viewer.lines[start..end].iter().cloned() {
-        lines.push(Line::from(line));
+    let active_match_line = viewer
+        .search_matches
+        .get(viewer.search_match_index)
+        .copied();
+    for (offset, line) in viewer.lines[start..end].iter().enumerate() {
+        let absolute = start + offset;
+        let is_match = viewer.search_matches.contains(&absolute);
+        let is_active_match = active_match_line == Some(absolute);
+        let style = if is_active_match {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else if is_match {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::LightYellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::styled(line.clone(), style));
     }
     while lines.len() < capacity {
         lines.push(Line::from(String::new()));

@@ -19,10 +19,14 @@ use crate::model::{
     AppState, ArchiveConnectionInfo, BackendSpec, BatchProgressState, Command, DialogButton,
     DialogButtonRole, DialogState, DialogTone, Event, FindPanelState, FindProgressState,
     FindRequest, FindUpdate, FsEntry, FsEntryType, Job, JobKind, JobRequest, JobStatus, JobUpdate,
-    PanelId, ScreenMode, SftpAuth, SftpConnectionInfo, SortMode, TerminalSize, ViewerState,
+    PanelId, ScreenMode, SftpAuth, SftpConnectionInfo, SortMode, TerminalSize, ViewerMode,
+    ViewerState,
 };
 use crate::theme::{DirColorsTheme, load_theme_from_environment};
-use crate::viewer::load_viewer_state;
+use crate::viewer::{
+    VIEWER_PREVIEW_LIMIT_BYTES, jump_to_next_match, load_viewer_state_from_preview,
+    refresh_viewer_search, set_viewer_mode,
+};
 use crate::{runtime, terminal};
 
 pub struct App {
@@ -44,6 +48,7 @@ pub struct App {
     pending_sftp_connect: Option<PendingSftpConnect>,
     pending_conflict: Option<PendingConflict>,
     pending_find: Option<PendingFind>,
+    pending_viewer_search: bool,
     batch_progress: HashMap<u64, BatchProgress>,
     left_active_find_id: Option<u64>,
     right_active_find_id: Option<u64>,
@@ -191,6 +196,7 @@ impl App {
             pending_sftp_connect: None,
             pending_conflict: None,
             pending_find: None,
+            pending_viewer_search: false,
             batch_progress: HashMap::new(),
             left_active_find_id: None,
             right_active_find_id: None,
@@ -285,6 +291,7 @@ impl App {
                 self.pending_sftp_connect = None;
                 self.pending_conflict = None;
                 self.pending_find = None;
+                self.pending_viewer_search = false;
                 self.state.dialog = None;
                 Ok(true)
             }
@@ -323,6 +330,10 @@ impl App {
             Command::ViewerPageDown => self.viewer_page_down(),
             Command::ViewerTop => self.viewer_top(),
             Command::ViewerBottom => self.viewer_bottom(),
+            Command::ViewerToggleMode => self.viewer_toggle_mode(),
+            Command::ViewerStartSearch => self.viewer_start_search_prompt(),
+            Command::ViewerSearchNext => self.viewer_search_next(),
+            Command::ViewerSearchPrev => self.viewer_search_prev(),
             Command::OpenEditor => self.open_editor(),
             Command::SelectRangeUp => self.select_range_up(),
             Command::SelectRangeDown => self.select_range_down(),
@@ -864,11 +875,6 @@ impl App {
     }
 
     fn open_viewer(&mut self) -> Result<bool> {
-        if !matches!(self.active_backend_spec(), BackendSpec::Local) {
-            self.show_alert("viewer is available only for local files in current build");
-            return Ok(true);
-        }
-
         let entry = self.selected_action_target_entry()?;
         if entry.entry_type == FsEntryType::Directory {
             return Err(anyhow::anyhow!(
@@ -880,7 +886,16 @@ impl App {
         let path = self
             .active_backend()
             .normalize_existing_path("viewer", &entry.path)?;
-        let viewer_state = load_viewer_state(path.clone(), entry.name, entry.size_bytes)?;
+        let (bytes, truncated) = self
+            .active_backend()
+            .read_file_preview(path.as_path(), VIEWER_PREVIEW_LIMIT_BYTES)?;
+        let viewer_state = load_viewer_state_from_preview(
+            path.clone(),
+            entry.name,
+            entry.size_bytes,
+            bytes,
+            truncated,
+        );
 
         self.input_mode = None;
         self.pending_confirmation = None;
@@ -889,6 +904,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_viewer_search = false;
         self.state.dialog = None;
         self.state.viewer = Some(viewer_state);
         self.state.screen_mode = ScreenMode::Viewer;
@@ -954,6 +970,7 @@ impl App {
 
         self.state.screen_mode = ScreenMode::Normal;
         self.state.viewer = None;
+        self.pending_viewer_search = false;
         self.state.status_line = "viewer closed".to_string();
         Ok(true)
     }
@@ -1016,6 +1033,58 @@ impl App {
         Ok(previous != viewer.scroll_offset)
     }
 
+    fn viewer_toggle_mode(&mut self) -> Result<bool> {
+        let Some(viewer) = self.state.viewer.as_mut() else {
+            return Ok(false);
+        };
+        let next_mode = match viewer.mode {
+            ViewerMode::Text => ViewerMode::Hex,
+            ViewerMode::Hex => ViewerMode::Text,
+        };
+        set_viewer_mode(viewer, next_mode);
+        self.state.status_line = format!("viewer mode: {}", viewer_mode_label(next_mode));
+        Ok(true)
+    }
+
+    fn viewer_start_search_prompt(&mut self) -> Result<bool> {
+        let Some(viewer) = self.state.viewer.as_ref() else {
+            return Ok(false);
+        };
+        self.pending_viewer_search = true;
+        self.state.dialog = Some(input_dialog(
+            "Viewer Search",
+            "Find in current viewer mode",
+            viewer.search_query.clone(),
+            DialogTone::Default,
+        ));
+        self.state.status_line = "viewer search: enter pattern".to_string();
+        Ok(true)
+    }
+
+    fn viewer_search_next(&mut self) -> Result<bool> {
+        let Some(viewer) = self.state.viewer.as_mut() else {
+            return Ok(false);
+        };
+        if jump_to_next_match(viewer, true).is_none() {
+            self.state.status_line = "viewer search: no matches".to_string();
+            return Ok(true);
+        }
+        self.state.status_line = viewer_match_status(viewer);
+        Ok(true)
+    }
+
+    fn viewer_search_prev(&mut self) -> Result<bool> {
+        let Some(viewer) = self.state.viewer.as_mut() else {
+            return Ok(false);
+        };
+        if jump_to_next_match(viewer, false).is_none() {
+            self.state.status_line = "viewer search: no matches".to_string();
+            return Ok(true);
+        }
+        self.state.status_line = viewer_match_status(viewer);
+        Ok(true)
+    }
+
     fn viewer_page_step(&self) -> usize {
         self.state.terminal_size.height.saturating_sub(4).max(1) as usize
     }
@@ -1042,6 +1111,7 @@ impl App {
         self.pending_mask = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_viewer_search = false;
         let default_value = match self.backend_spec(panel_id) {
             BackendSpec::Sftp(info) => {
                 format!("{}:{}{}", info.host, info.port, info.root_path.display())
@@ -1079,6 +1149,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_viewer_search = false;
         self.state.dialog = None;
 
         let local_cwd = self.last_local_cwd(panel_id);
@@ -1103,6 +1174,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_viewer_search = false;
         self.state.dialog = None;
         self.input_mode = Some(InputMode::Search(panel_id));
         let query = self.panel_mut(panel_id).search_query.clone();
@@ -1132,6 +1204,7 @@ impl App {
         self.pending_mask = None;
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
+        self.pending_viewer_search = false;
         let default_hidden = self.panel(panel_id).show_hidden;
         self.pending_find = Some(PendingFind {
             panel_id,
@@ -1184,6 +1257,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_viewer_search = false;
         self.pending_mask = Some(PendingMask { panel_id, select });
         let title = if select {
             "Select by mask"
@@ -1392,6 +1466,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_viewer_search = false;
         let destination_dir = self.inactive_panel_cwd();
         self.pending_rename = Some(PendingRename {
             kind,
@@ -2297,6 +2372,17 @@ impl App {
             };
         }
 
+        if self.pending_viewer_search {
+            return if role == DialogButtonRole::Primary {
+                self.apply_viewer_search()
+            } else {
+                self.pending_viewer_search = false;
+                self.state.dialog = None;
+                self.push_log("viewer search canceled");
+                true
+            };
+        }
+
         self.state.dialog = None;
         true
     }
@@ -2341,6 +2427,13 @@ impl App {
             self.pending_find = None;
             self.state.dialog = None;
             self.push_log("find canceled");
+            return true;
+        }
+
+        if self.pending_viewer_search {
+            self.pending_viewer_search = false;
+            self.state.dialog = None;
+            self.push_log("viewer search canceled");
             return true;
         }
 
@@ -2625,6 +2718,30 @@ impl App {
         true
     }
 
+    fn apply_viewer_search(&mut self) -> bool {
+        let query = self
+            .state
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.input_value.as_ref())
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        self.pending_viewer_search = false;
+        self.state.dialog = None;
+
+        let Some(viewer) = self.state.viewer.as_mut() else {
+            return true;
+        };
+        viewer.search_query = query;
+        refresh_viewer_search(viewer);
+        if viewer.search_matches.is_empty() {
+            self.state.status_line = "viewer search: no matches".to_string();
+        } else {
+            self.state.status_line = viewer_match_status(viewer);
+        }
+        true
+    }
+
     fn proceed_sftp_auth_flow(&mut self, pending: PendingSftpConnect) -> bool {
         let Some(user) = pending.draft.user.clone() else {
             return self.prompt_sftp_login(pending);
@@ -2703,6 +2820,7 @@ impl App {
             && self.pending_mask.is_none()
             && self.pending_sftp_connect.is_none()
             && self.pending_find.is_none()
+            && !self.pending_viewer_search
         {
             return false;
         }
@@ -2720,6 +2838,7 @@ impl App {
             && self.pending_mask.is_none()
             && self.pending_sftp_connect.is_none()
             && self.pending_find.is_none()
+            && !self.pending_viewer_search
         {
             return false;
         }
@@ -2969,8 +3088,10 @@ impl App {
             }
             MenuAction::ToggleSort => self.toggle_sort(),
             MenuAction::Refresh => self.refresh_all(),
-            MenuAction::ViewerModesPlanned => {
-                self.show_alert("Viewer mode extensions are planned for Step 32");
+            MenuAction::ViewerModesInfo => {
+                self.show_alert(
+                    "Viewer controls: F2 toggle text/hex, / search, n/N next/prev match",
+                );
                 Ok(true)
             }
             MenuAction::EditorSettingsPlanned => {
@@ -3244,19 +3365,23 @@ impl App {
 
     fn open_command_output_viewer(&mut self, command: &str, output: &std::process::Output) {
         let mut lines = Vec::new();
+        let mut raw = Vec::new();
 
         if !output.stdout.is_empty() {
             let stdout_text = String::from_utf8_lossy(&output.stdout);
             lines.extend(stdout_text.lines().map(|line| line.to_string()));
+            raw.extend_from_slice(output.stdout.as_slice());
         }
 
         if !output.stderr.is_empty() {
             if !lines.is_empty() {
                 lines.push(String::new());
+                raw.push(b'\n');
             }
             lines.push("[stderr]".to_string());
             let stderr_text = String::from_utf8_lossy(&output.stderr);
             lines.extend(stderr_text.lines().map(|line| line.to_string()));
+            raw.extend_from_slice(output.stderr.as_slice());
         }
 
         if lines.is_empty() {
@@ -3266,15 +3391,20 @@ impl App {
         lines.push(format!("[exit status: {}]", output.status));
 
         let byte_size = (output.stdout.len() + output.stderr.len()) as u64;
-        self.state.viewer = Some(ViewerState {
-            path: PathBuf::from(format!("<cmd:{command}>")),
-            title: format!("Command Output: {command}"),
-            lines,
-            scroll_offset: 0,
-            is_binary_like: false,
+        let mut state = load_viewer_state_from_preview(
+            PathBuf::from(format!("<cmd:{command}>")),
+            format!("Command Output: {command}"),
             byte_size,
-        });
+            raw,
+            false,
+        );
+        state.mode = ViewerMode::Text;
+        state.text_lines = lines.clone();
+        state.lines = lines;
+        refresh_viewer_search(&mut state);
+        self.state.viewer = Some(state);
         self.state.screen_mode = ScreenMode::Viewer;
+        self.pending_viewer_search = false;
         self.state.status_line = format!("command output: {command}");
     }
 
@@ -3308,6 +3438,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_viewer_search = false;
         self.state.dialog = Some(alert_dialog(message.clone()));
         self.push_log(message);
     }
@@ -3380,6 +3511,14 @@ fn map_viewer_key_to_command(key: &KeyEvent) -> Option<Command> {
     match key.code {
         KeyCode::Esc | KeyCode::F(3) => Some(Command::CloseViewer),
         KeyCode::Char('q') if key.modifiers.is_empty() => Some(Command::CloseViewer),
+        KeyCode::F(2) => Some(Command::ViewerToggleMode),
+        KeyCode::Char('/') if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
+            Some(Command::ViewerStartSearch)
+        }
+        KeyCode::Char('n') if key.modifiers.is_empty() => Some(Command::ViewerSearchNext),
+        KeyCode::Char('N') if key.modifiers == KeyModifiers::SHIFT => {
+            Some(Command::ViewerSearchPrev)
+        }
         KeyCode::Up => Some(Command::ViewerScrollUp),
         KeyCode::Down => Some(Command::ViewerScrollDown),
         KeyCode::PageUp => Some(Command::ViewerPageUp),
@@ -3699,6 +3838,28 @@ fn format_mtime_hint(value: Option<std::time::SystemTime>) -> String {
         Some(ts) => format!("{ts:?}"),
         None => "-".to_string(),
     }
+}
+
+fn viewer_mode_label(mode: ViewerMode) -> &'static str {
+    match mode {
+        ViewerMode::Text => "text",
+        ViewerMode::Hex => "hex",
+    }
+}
+
+fn viewer_match_status(viewer: &ViewerState) -> String {
+    let total = viewer.search_matches.len();
+    if total == 0 {
+        return "viewer search: no matches".to_string();
+    }
+    let current = viewer.search_match_index + 1;
+    format!(
+        "viewer search [{}/{}]: '{}' ({})",
+        current,
+        total,
+        viewer.search_query,
+        viewer_mode_label(viewer.mode)
+    )
 }
 
 fn split_name_and_extension(name: &str) -> (String, String) {

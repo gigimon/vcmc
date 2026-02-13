@@ -309,10 +309,10 @@ MVP-функции (итерация 1):
 [x] Сделать fallback: если `fd` не найден, показать понятный диалог с подсказкой по установке.
 
 ## Step 32: Viewer+ (улучшения просмотра)
-[] Добавить `hex-mode` для бинарных файлов и переключение режимов `text/hex`.
-[] Добавить поиск внутри viewer (`/`, next/prev, highlight match).
-[] Поддержать viewer для remote/SFTP файлов через ограниченный buffered read.
-[] Добавить расширенный статус viewer (mode, offset, line/byte position, matches).
+[x] Добавить `hex-mode` для бинарных файлов и переключение режимов `text/hex`.
+[x] Добавить поиск внутри viewer (`/`, next/prev, highlight match).
+[x] Поддержать viewer для remote/SFTP файлов через ограниченный buffered read.
+[x] Добавить расширенный статус viewer (mode, offset, line/byte position, matches).
 
 ## Step 33: Editor Discovery и first-run chooser для `F4`
 [] При отсутствии `$EDITOR` запускать автообнаружение популярных редакторов (`nvim`, `vim`, `nano`, `hx`, `micro`, `emacs`, `code -w`).

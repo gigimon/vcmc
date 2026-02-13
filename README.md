@@ -18,6 +18,7 @@ Implemented:
 - stable table layout (`Name | Size | Modified`) with narrow-width fallback
 - unified dialog kit with buttons, focus, and keyboard navigation
 - fullscreen viewer (`F3`) with smart text/binary-like fallback
+- viewer+ (`F3`) with `text/hex` mode toggle and in-view search (`/`, `n`, `N`)
 - external editor integration (`F4`) via `$EDITOR` with terminal suspend/resume
 - context-sensitive footer menu (MC-style) for `Normal`, `Selection`, `Dialog`, and `Viewer` modes
 - top menu bar (MC-like) with keyboard navigation and action groups
@@ -78,6 +79,9 @@ Dialog controls:
 - conflict dialog: `Alt+O` overwrite, `Alt+S` skip, `Alt+R` rename, `Alt+N` newer, `Alt+W/K/A` for `*All`, `Alt+C` cancel
 
 Viewer controls:
+- `F2`: toggle mode (`text` / `hex`)
+- `/`: search in current viewer mode
+- `n` / `N`: next / previous search match
 - `Up/Down`: scroll line-by-line
 - `PgUp/PgDn`: scroll page-by-page
 - `Home/End`: jump to top/bottom
@@ -131,6 +135,7 @@ Security notes:
 - SFTP backend uses short connection retries with timeout guards
 - SFTP smoke checks are optional and run only when `VCMC_SFTP_SMOKE_*` env is configured
 - archive VFS is read-only in v1 (no create/delete/move/write inside archive)
+- viewer reads are preview-limited (`256 KB`) on all backends (local/sftp/archive)
 - find via `fd` requires external `fd` binary available in `PATH`
 
 ## Known UX Constraints
@@ -139,7 +144,7 @@ Security notes:
 - viewer text rendering truncates very long lines (`512` chars) for stable TUI layout
 - dialog mode uses keyboard-first interaction only (no mouse support)
 - there is no internal editor yet (external `$EDITOR` only)
-- viewer/editor currently operate on local files only (SFTP preview/edit not yet wired)
+- editor currently operates on local files only (viewer works for local/sftp/archive preview)
 - SFTP smoke integration requires explicit test host env (not auto-run by default)
 - archive VFS open is currently local-only (no direct open from SFTP file yet)
 - copy into archive VFS is not implemented yet (copy out only)
