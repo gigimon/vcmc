@@ -7,14 +7,13 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
 use crate::model::{
     AppState, DialogButton, DialogButtonRole, DialogState, DialogTone, FsEntry, FsEntryType,
-    JobStatus, PanelId, PanelState, SortMode,
+    PanelId, PanelState, SortMode,
 };
 
 pub fn render(frame: &mut Frame, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(1),
@@ -22,12 +21,10 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         ])
         .split(frame.area());
 
-    render_header(frame, chunks[0], state);
-
     let panel_chunks = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-        .split(chunks[1]);
+        .split(chunks[0]);
 
     render_panel(
         frame,
@@ -44,34 +41,13 @@ pub fn render(frame: &mut Frame, state: &AppState) {
         state.active_panel == PanelId::Right,
     );
 
-    render_status(frame, chunks[2], state);
-    render_log(frame, chunks[3], state);
-    render_footer(frame, chunks[4], state);
+    render_status(frame, chunks[1], state);
+    render_log(frame, chunks[2], state);
+    render_footer(frame, chunks[3], state);
 
     if let Some(dialog) = &state.dialog {
         render_dialog(frame, dialog);
     }
-}
-
-fn render_header(frame: &mut Frame, area: Rect, state: &AppState) {
-    let (queued, running, failed) = job_counters(state);
-    let active = match state.active_panel {
-        PanelId::Left => "LEFT",
-        PanelId::Right => "RIGHT",
-    };
-    let header = Paragraph::new(Line::from(vec![
-        Span::styled(
-            "VCMC ",
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(format!(
-            "active:{active}  size:{}x{}  jobs q/r/f:{queued}/{running}/{failed}",
-            state.terminal_size.width, state.terminal_size.height
-        )),
-    ]));
-    frame.render_widget(header, area);
 }
 
 fn render_panel(frame: &mut Frame, area: Rect, name: &str, panel: &PanelState, active: bool) {
@@ -184,7 +160,7 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
                     ),
                     base_style.patch(type_style(entry)),
                 ));
-                spans.push(Span::styled(" ", base_style));
+                spans.push(Span::styled("|", base_style));
                 spans.push(Span::styled(
                     format!(
                         "{:>size_width$}",
@@ -193,7 +169,7 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
                     ),
                     base_style,
                 ));
-                spans.push(Span::styled(" ", base_style));
+                spans.push(Span::styled("|", base_style));
                 spans.push(Span::styled(
                     format!(
                         "{:>modified_width$}",
@@ -215,7 +191,7 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
                     ),
                     base_style.patch(type_style(entry)),
                 ));
-                spans.push(Span::styled(" ", base_style));
+                spans.push(Span::styled("|", base_style));
                 spans.push(Span::styled(
                     format!(
                         "{:>size_width$}",
@@ -454,7 +430,7 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
     let constraints = if dialog.input_value.is_some() {
         vec![
             Constraint::Min(1),
-            Constraint::Length(1),
+            Constraint::Length(3),
             Constraint::Length(1),
         ]
     } else {
@@ -469,12 +445,18 @@ fn render_dialog(frame: &mut Frame, dialog: &DialogState) {
     frame.render_widget(body, chunks[0]);
 
     let button_row_idx = if let Some(value) = dialog.input_value.as_ref() {
+        let label = input_label(dialog);
+        let input_block = Block::default()
+            .title(label)
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(Color::Yellow));
         let input = Paragraph::new(Line::styled(
-            format!("> {value}"),
+            format!("{value}|"),
             Style::default()
                 .fg(Color::White)
-                .add_modifier(Modifier::UNDERLINED),
-        ));
+                .add_modifier(Modifier::BOLD),
+        ))
+        .block(input_block);
         frame.render_widget(input, chunks[1]);
         2
     } else {
@@ -517,6 +499,15 @@ fn button_label(button: &DialogButton) -> String {
     match button.accelerator {
         Some(accel) => format!("Alt+{} {}", accel.to_ascii_uppercase(), button.label),
         None => button.label.clone(),
+    }
+}
+
+fn input_label(dialog: &DialogState) -> &'static str {
+    let title = dialog.title.to_ascii_lowercase();
+    if title.contains("mask") {
+        "Mask"
+    } else {
+        "Name"
     }
 }
 
@@ -598,7 +589,7 @@ fn render_table_header(layout: TableLayout) -> Line<'static> {
             size_width,
             modified_width,
         } => format!(
-            "{:<name_width$} {:>size_width$} {:>modified_width$}",
+            "{:<name_width$}|{:>size_width$}|{:>modified_width$}",
             "Name",
             "Size",
             "Modified",
@@ -610,7 +601,7 @@ fn render_table_header(layout: TableLayout) -> Line<'static> {
             name_width,
             size_width,
         } => format!(
-            "{:<name_width$} {:>size_width$}",
+            "{:<name_width$}|{:>size_width$}",
             "Name",
             "Size",
             name_width = name_width,
@@ -642,14 +633,24 @@ fn entry_name(entry: &FsEntry) -> String {
 }
 
 fn truncate_name(name: &str, width: usize) -> String {
-    if width <= 1 {
-        return "…".to_string();
+    if width == 0 {
+        return String::new();
     }
+
+    let char_count = name.chars().count();
+    if char_count <= width {
+        return name.to_string();
+    }
+
+    if width <= 3 {
+        return ".".repeat(width);
+    }
+
     let mut truncated = String::new();
-    for c in name.chars().take(width - 1) {
+    for c in name.chars().take(width - 3) {
         truncated.push(c);
     }
-    truncated.push('…');
+    truncated.push_str("...");
     truncated
 }
 
@@ -680,23 +681,6 @@ fn search_suffix(panel: &PanelState) -> String {
     } else {
         format!("  /{}", panel.search_query)
     }
-}
-
-fn job_counters(state: &AppState) -> (usize, usize, usize) {
-    let mut queued = 0;
-    let mut running = 0;
-    let mut failed = 0;
-
-    for job in &state.jobs {
-        match job.status {
-            JobStatus::Queued => queued += 1,
-            JobStatus::Running => running += 1,
-            JobStatus::Failed => failed += 1,
-            JobStatus::Done => {}
-        }
-    }
-
-    (queued, running, failed)
 }
 
 fn human_size(bytes: u64) -> String {

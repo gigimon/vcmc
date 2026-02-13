@@ -634,9 +634,14 @@ impl App {
             JobKind::Move => "Move as",
             _ => "Rename as",
         };
+        let body = match kind {
+            JobKind::Copy => format!("Copy '{}' with new name:", entry.name),
+            JobKind::Move => format!("Move '{}' with new name:", entry.name),
+            _ => "Edit target name:".to_string(),
+        };
         self.state.dialog = Some(input_dialog(
             verb,
-            "Use Tab/Shift+Tab or Left/Right to focus buttons",
+            body.as_str(),
             entry.name.clone(),
             DialogTone::Default,
         ));
