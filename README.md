@@ -8,11 +8,13 @@ Implemented:
 - two-panel layout with active panel focus
 - navigation (`Tab`, `Up/Down`, `Enter`, `Backspace`, `Home`, `~`)
 - file operations (`copy`, `move`, `delete`, `mkdir`) via background jobs
-- delete confirmation modal and error alert modal
+- MC-like multi-select (`Space/Ins`, range selection, select/deselect by mask, invert)
+- batch `F5/F6/F8` over selected items with preflight checks and summary confirm
 - incremental search (`/`) per panel
 - per-panel sorting (`F2`)
-- copy/move rename dialog (`F5`, `F6`)
-- tabular list view (`Name | Size | Modified`) with colorized file types
+- stable table layout (`Name | Size | Modified`) with narrow-width fallback
+- unified dialog kit with buttons, focus, and keyboard navigation
+- context-sensitive footer menu (MC-style) for `Normal`, `Selection`, and `Dialog` modes
 
 ## Run
 
@@ -28,23 +30,33 @@ cargo run -- --smoke
 
 ## Hotkeys
 
+General:
 - `Tab`: switch active panel
-- `Up/Down`: move selection
+- `Up/Down`: move current row
 - `Enter`: open selected directory
 - `Backspace`: go to parent directory
 - `Home` or `~`: go to home directory
 - `/`: start incremental search for active panel
 - `F2`: cycle sort mode (`name -> size -> mtime`)
-- `F5`: copy with rename dialog
-- `F6`: move with rename dialog
+- `F5`: copy (`selection -> batch`, otherwise current item)
+- `F6`: move (`selection -> batch`, otherwise current item)
 - `F7`: create directory
-- `F8`: delete (with confirmation)
-- `q`: quit
+- `F8`: delete (`selection -> batch`, otherwise current item)
+- `F10` or `q`: quit
 
-Modal controls:
-- delete confirm: `y/Y` to confirm, `n/N`, `Esc`, or `Enter` to cancel
-- rename dialog: `Enter` apply, `Esc` cancel
-- alert modal: any key closes
+Selection:
+- `Space` / `Ins`: toggle mark on current row
+- `Shift+Up/Down`: range select from anchor
+- `+`: select by mask (`*`, `?`)
+- `-`: deselect by mask
+- `*`: invert selection
+
+Dialog controls:
+- `Tab` / `Shift+Tab`: move button focus
+- `Left/Right`: move button focus
+- `Enter`: activate focused button
+- `Esc`: cancel/close dialog
+- `Alt+<letter>`: button accelerator (`Alt+Y`, `Alt+N`, `Alt+A`, `Alt+C`, ...)
 
 ## Architecture
 
@@ -58,19 +70,19 @@ Modal controls:
 - POSIX-first (`macOS`, `Linux`) for v1
 - delete is permanent (no Trash integration)
 - overwrite flow is not implemented; conflicts are aborted explicitly
-- no archive/preview/multi-select/tabs yet
+- no built-in preview panel yet
 
-## Known Issues
+## Known UX Constraints
 
-- column widths are currently heuristic and not fully adaptive per terminal width
-- no keyboard shortcut remapping yet
-- no batch conflict resolution dialog yet
+- footer actions are partially placeholders (`F1/F3/F4/F9` shown for MC parity, not implemented yet)
+- dialog mode uses keyboard-first interaction only (no mouse support)
+- there is no interactive conflict resolution matrix (`overwrite/rename/skip`) yet
 
-## Backlog (v2 candidates)
+## Backlog (next)
 
-- overwrite/rename/skip conflict resolution dialog
-- integrated file preview panel
-- multi-select and bulk operations
+- preview panel and richer file metadata
 - tabs/bookmarks/favorites
+- overwrite/rename/skip conflict resolution dialog
 - archive operations (zip/tar)
 - optional Trash mode for safer delete behavior
+- configurable keymap

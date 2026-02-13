@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
-use crossbeam_channel::unbounded;
+use crossbeam_channel::{Receiver, unbounded};
 
 use crate::fs::FsAdapter;
 use crate::jobs::WorkerPool;
@@ -19,6 +19,10 @@ pub struct SmokeReport {
     pub copy_total_ms: f64,
     pub ui_loop_iterations: u64,
     pub copied_files: usize,
+    pub batch_items: usize,
+    pub batch_copy_total_ms: f64,
+    pub batch_move_total_ms: f64,
+    pub batch_delete_total_ms: f64,
 }
 
 impl SmokeReport {
@@ -32,7 +36,11 @@ impl SmokeReport {
                 "copy_submit_ms: {:.3}\n",
                 "copy_total_ms: {:.2}\n",
                 "ui_loop_iterations_while_copy: {}\n",
-                "copied_files: {}\n"
+                "copied_files: {}\n",
+                "batch_items: {}\n",
+                "batch_copy_total_ms: {:.2}\n",
+                "batch_move_total_ms: {:.2}\n",
+                "batch_delete_total_ms: {:.2}\n"
             ),
             self.temp_root.display(),
             self.first_listing_ms,
@@ -40,7 +48,11 @@ impl SmokeReport {
             self.copy_submit_ms,
             self.copy_total_ms,
             self.ui_loop_iterations,
-            self.copied_files
+            self.copied_files,
+            self.batch_items,
+            self.batch_copy_total_ms,
+            self.batch_move_total_ms,
+            self.batch_delete_total_ms
         )
     }
 }
@@ -133,6 +145,118 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
         );
     }
 
+    let batch_item_count = workload.batch_sources.len();
+    let mut next_job_id = 10_000_u64;
+
+    let batch_copy_start = Instant::now();
+    let mut batch_copy_job_ids = Vec::with_capacity(batch_item_count);
+    for source in &workload.batch_sources {
+        let file_name = source.file_name().ok_or_else(|| {
+            anyhow::anyhow!("batch copy source has no file name: {}", source.display())
+        })?;
+        let destination = workload.batch_copy_destination.join(file_name);
+        let id = next_job_id;
+        next_job_id += 1;
+        worker_pool.submit(JobRequest {
+            id,
+            batch_id: Some(21),
+            kind: JobKind::Copy,
+            source: source.clone(),
+            destination: Some(destination),
+        })?;
+        batch_copy_job_ids.push(id);
+    }
+    wait_for_terminal_updates(
+        &event_rx,
+        &batch_copy_job_ids,
+        Duration::from_secs(20),
+        "batch-copy",
+    )?;
+    let batch_copy_total_ms = batch_copy_start.elapsed().as_secs_f64() * 1_000.0;
+
+    let copied_batch_files = count_regular_files(&workload.batch_copy_destination)?;
+    if copied_batch_files != batch_item_count {
+        bail!(
+            "batch copy mismatch: expected {} files in {}, got {}",
+            batch_item_count,
+            workload.batch_copy_destination.display(),
+            copied_batch_files
+        );
+    }
+
+    let batch_move_start = Instant::now();
+    let mut batch_move_job_ids = Vec::with_capacity(batch_item_count);
+    for source in &workload.batch_sources {
+        let file_name = source.file_name().ok_or_else(|| {
+            anyhow::anyhow!("batch move source has no file name: {}", source.display())
+        })?;
+        let source_path = workload.batch_copy_destination.join(file_name);
+        let destination = workload.batch_move_destination.join(file_name);
+        let id = next_job_id;
+        next_job_id += 1;
+        worker_pool.submit(JobRequest {
+            id,
+            batch_id: Some(22),
+            kind: JobKind::Move,
+            source: source_path,
+            destination: Some(destination),
+        })?;
+        batch_move_job_ids.push(id);
+    }
+    wait_for_terminal_updates(
+        &event_rx,
+        &batch_move_job_ids,
+        Duration::from_secs(20),
+        "batch-move",
+    )?;
+    let batch_move_total_ms = batch_move_start.elapsed().as_secs_f64() * 1_000.0;
+
+    let moved_batch_files = count_regular_files(&workload.batch_move_destination)?;
+    if moved_batch_files != batch_item_count {
+        bail!(
+            "batch move mismatch: expected {} files in {}, got {}",
+            batch_item_count,
+            workload.batch_move_destination.display(),
+            moved_batch_files
+        );
+    }
+    let leftover_after_move = count_regular_files(&workload.batch_copy_destination)?;
+    if leftover_after_move != 0 {
+        bail!(
+            "batch move left stale files in {}: {}",
+            workload.batch_copy_destination.display(),
+            leftover_after_move
+        );
+    }
+
+    let batch_delete_start = Instant::now();
+    let mut batch_delete_job_ids = Vec::with_capacity(batch_item_count);
+    for target in &workload.batch_delete_targets {
+        let id = next_job_id;
+        next_job_id += 1;
+        worker_pool.submit(JobRequest {
+            id,
+            batch_id: Some(23),
+            kind: JobKind::Delete,
+            source: target.clone(),
+            destination: None,
+        })?;
+        batch_delete_job_ids.push(id);
+    }
+    wait_for_terminal_updates(
+        &event_rx,
+        &batch_delete_job_ids,
+        Duration::from_secs(20),
+        "batch-delete",
+    )?;
+    let batch_delete_total_ms = batch_delete_start.elapsed().as_secs_f64() * 1_000.0;
+
+    for target in &workload.batch_delete_targets {
+        if target.try_exists()? {
+            bail!("batch delete target still exists: {}", target.display());
+        }
+    }
+
     Ok(SmokeReport {
         temp_root: temp_root.to_path_buf(),
         first_listing_ms,
@@ -141,6 +265,10 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
         copy_total_ms,
         ui_loop_iterations,
         copied_files,
+        batch_items: batch_item_count,
+        batch_copy_total_ms,
+        batch_move_total_ms,
+        batch_delete_total_ms,
     })
 }
 
@@ -150,6 +278,10 @@ struct SmokeWorkload {
     copy_source: PathBuf,
     copy_destination_dir: PathBuf,
     copy_expected_files: usize,
+    batch_sources: Vec<PathBuf>,
+    batch_copy_destination: PathBuf,
+    batch_move_destination: PathBuf,
+    batch_delete_targets: Vec<PathBuf>,
 }
 
 fn prepare_workload(root: &Path) -> Result<SmokeWorkload> {
@@ -178,12 +310,37 @@ fn prepare_workload(root: &Path) -> Result<SmokeWorkload> {
     let copy_expected_files = 1_500usize;
     create_many_files(&copy_source_dir, copy_expected_files)?;
 
+    let batch_source_dir = root.join("batch_src");
+    let batch_copy_destination = root.join("batch_copy_dst");
+    let batch_move_destination = root.join("batch_move_dst");
+    let batch_delete_dir = root.join("batch_delete_src");
+    fs::create_dir_all(&batch_source_dir)?;
+    fs::create_dir_all(&batch_copy_destination)?;
+    fs::create_dir_all(&batch_move_destination)?;
+    fs::create_dir_all(&batch_delete_dir)?;
+
+    let batch_items = 64usize;
+    let mut batch_sources = Vec::with_capacity(batch_items);
+    let mut batch_delete_targets = Vec::with_capacity(batch_items);
+    for idx in 0..batch_items {
+        let copy_file = batch_source_dir.join(format!("copy_{idx:03}.txt"));
+        let delete_file = batch_delete_dir.join(format!("delete_{idx:03}.txt"));
+        create_single_file(&copy_file, 96)?;
+        create_single_file(&delete_file, 96)?;
+        batch_sources.push(copy_file);
+        batch_delete_targets.push(delete_file);
+    }
+
     Ok(SmokeWorkload {
         list_dir,
         navigation_paths,
         copy_source: copy_source_dir,
         copy_destination_dir,
         copy_expected_files,
+        batch_sources,
+        batch_copy_destination,
+        batch_move_destination,
+        batch_delete_targets,
     })
 }
 
@@ -225,4 +382,53 @@ fn count_regular_files(path: &Path) -> Result<usize> {
         }
     }
     Ok(count)
+}
+
+fn wait_for_terminal_updates(
+    event_rx: &Receiver<Event>,
+    expected_job_ids: &[u64],
+    timeout: Duration,
+    scope: &str,
+) -> Result<()> {
+    let expected: std::collections::HashSet<u64> = expected_job_ids.iter().copied().collect();
+    let mut completed = std::collections::HashSet::new();
+    let start = Instant::now();
+
+    while completed.len() < expected.len() {
+        if start.elapsed() > timeout {
+            bail!(
+                "{scope} timed out: completed {} out of {} jobs",
+                completed.len(),
+                expected.len()
+            );
+        }
+
+        match event_rx.recv_timeout(Duration::from_millis(10)) {
+            Ok(Event::Job(update)) => {
+                if !expected.contains(&update.id) {
+                    continue;
+                }
+                if !matches!(update.status, JobStatus::Done | JobStatus::Failed) {
+                    continue;
+                }
+                if !completed.insert(update.id) {
+                    continue;
+                }
+                if update.status == JobStatus::Failed {
+                    bail!(
+                        "{scope} failed for job {}: {}",
+                        update.id,
+                        update
+                            .message
+                            .unwrap_or_else(|| "unknown failure".to_string())
+                    );
+                }
+            }
+            Ok(_) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(err) => bail!("{scope} failed to receive job update: {err}"),
+        }
+    }
+
+    Ok(())
 }

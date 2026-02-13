@@ -746,3 +746,45 @@ fn centered_rect(width_percent: u16, height: u16, area: Rect) -> Rect {
         .split(vertical[1]);
     horizontal[1]
 }
+
+#[cfg(test)]
+mod tests {
+    use super::{TableLayout, fixed_table_layout};
+
+    #[test]
+    fn fixed_table_layout_switches_modes_for_narrow_widths() {
+        assert!(matches!(fixed_table_layout(8), TableLayout::Minimal { .. }));
+        assert!(matches!(
+            fixed_table_layout(20),
+            TableLayout::Compact { .. }
+        ));
+        assert!(matches!(fixed_table_layout(80), TableLayout::Full { .. }));
+    }
+
+    #[test]
+    fn fixed_table_layout_never_exceeds_panel_width() {
+        for width in 1usize..=180 {
+            let layout = fixed_table_layout(width);
+            assert!(
+                layout_total_width(layout) <= width,
+                "layout width exceeds panel width: panel={width}, layout={}",
+                layout_total_width(layout)
+            );
+        }
+    }
+
+    fn layout_total_width(layout: TableLayout) -> usize {
+        match layout {
+            TableLayout::Full {
+                name_width,
+                size_width,
+                modified_width,
+            } => name_width + size_width + modified_width + 2,
+            TableLayout::Compact {
+                name_width,
+                size_width,
+            } => name_width + size_width + 1,
+            TableLayout::Minimal { name_width } => name_width,
+        }
+    }
+}
