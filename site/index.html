@@ -1,0 +1,305 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>VCMC — быстрый файловый менеджер</title>
+  <meta name="description" content="VCMC — двухпанельный terminal file manager в стиле Midnight Commander, написанный на Rust." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Oswald:wght@400;600&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --bg: #0e1316;
+      --bg-soft: #162027;
+      --panel: #f3f0e9;
+      --ink: #1b1916;
+      --ink-soft: #4b4844;
+      --accent: #d34d2e;
+      --accent-2: #efad2d;
+      --line: rgba(255, 255, 255, 0.12);
+      --shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
+      --radius: 18px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      font-family: "IBM Plex Mono", monospace;
+      color: var(--panel);
+      background:
+        radial-gradient(circle at 8% 8%, rgba(239, 173, 45, 0.22), transparent 40%),
+        radial-gradient(circle at 92% 20%, rgba(211, 77, 46, 0.22), transparent 45%),
+        linear-gradient(180deg, #12191d 0%, #0d1215 100%);
+      min-height: 100dvh;
+    }
+
+    .grain {
+      position: fixed;
+      inset: 0;
+      pointer-events: none;
+      background-image: linear-gradient(var(--line) 1px, transparent 1px), linear-gradient(90deg, var(--line) 1px, transparent 1px);
+      background-size: 48px 48px;
+      opacity: 0.2;
+      z-index: 0;
+    }
+
+    .wrap {
+      position: relative;
+      z-index: 1;
+      width: min(1060px, 100% - 2rem);
+      margin: 2rem auto 3rem;
+      display: grid;
+      gap: 1.1rem;
+    }
+
+    .hero {
+      background: linear-gradient(135deg, rgba(243, 240, 233, 0.06), rgba(243, 240, 233, 0.02));
+      border: 1px solid rgba(243, 240, 233, 0.18);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+      animation: rise 0.55s ease-out;
+    }
+
+    .eyebrow {
+      letter-spacing: 0.11em;
+      text-transform: uppercase;
+      font-size: 0.78rem;
+      opacity: 0.85;
+      color: var(--accent-2);
+    }
+
+    h1 {
+      margin: 0.45rem 0 0.65rem;
+      font-family: "Oswald", sans-serif;
+      font-size: clamp(2rem, 6.8vw, 4.7rem);
+      line-height: 0.95;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+    }
+
+    .lead {
+      margin: 0;
+      font-size: clamp(0.95rem, 2.5vw, 1.08rem);
+      color: rgba(243, 240, 233, 0.92);
+      max-width: 66ch;
+    }
+
+    .cta {
+      margin-top: 1.1rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+    }
+
+    .btn {
+      border: 0;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #fff;
+      padding: 0.62rem 0.9rem;
+      font: inherit;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.15s ease, background 0.2s ease;
+    }
+
+    .btn.alt {
+      background: transparent;
+      color: var(--panel);
+      border: 1px solid rgba(243, 240, 233, 0.35);
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+      background: #bd3f23;
+    }
+
+    .btn.alt:hover {
+      background: rgba(243, 240, 233, 0.1);
+    }
+
+    .grid {
+      display: grid;
+      gap: 1.1rem;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+    }
+
+    .card {
+      background: var(--panel);
+      color: var(--ink);
+      border-radius: var(--radius);
+      border: 1px solid rgba(0, 0, 0, 0.08);
+      padding: 1rem;
+      box-shadow: var(--shadow);
+      animation: rise 0.6s ease-out;
+    }
+
+    .card h2 {
+      margin: 0 0 0.65rem;
+      font-family: "Oswald", sans-serif;
+      font-size: 1.2rem;
+      text-transform: uppercase;
+      letter-spacing: 0.02em;
+      color: #322f2b;
+    }
+
+    .card p,
+    .card li,
+    .card code {
+      color: var(--ink-soft);
+      font-size: 0.92rem;
+      line-height: 1.5;
+    }
+
+    .card code {
+      color: #22201d;
+      background: rgba(0, 0, 0, 0.05);
+      border-radius: 7px;
+      padding: 0.1rem 0.34rem;
+    }
+
+    .c-main {
+      grid-column: span 7;
+    }
+
+    .c-side {
+      grid-column: span 5;
+    }
+
+    ul {
+      margin: 0;
+      padding-left: 1rem;
+    }
+
+    .kbd {
+      display: inline-block;
+      border: 1px solid rgba(0, 0, 0, 0.22);
+      border-bottom-width: 2px;
+      border-radius: 6px;
+      padding: 0.04rem 0.34rem;
+      font-size: 0.78rem;
+      color: #1f1d1a;
+      background: #f9f6ef;
+    }
+
+    .foot {
+      text-align: center;
+      font-size: 0.78rem;
+      color: rgba(243, 240, 233, 0.72);
+      padding: 0.3rem 0;
+    }
+
+    .mkdocs {
+      border-left: 4px solid var(--accent);
+      padding-left: 0.72rem;
+    }
+
+    @media (max-width: 880px) {
+      .c-main,
+      .c-side {
+        grid-column: span 12;
+      }
+
+      .wrap {
+        width: min(1060px, 100% - 1.1rem);
+      }
+
+      .hero {
+        padding: 1.15rem;
+      }
+    }
+
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="grain" aria-hidden="true"></div>
+  <main class="wrap">
+    <section class="hero">
+      <div class="eyebrow">Rust + ratatui + crossterm</div>
+      <h1>VCMC</h1>
+      <p class="lead">
+        Быстрый двухпанельный файловый менеджер в стиле Midnight Commander.
+        Локальный режим, SFTP, архивы, viewer, editor и поиск прямо из терминала.
+      </p>
+      <div class="cta">
+        <button class="btn" data-copy="cargo run">Скопировать: cargo run</button>
+        <button class="btn alt" data-copy="cargo run -- --smoke">Скопировать: smoke</button>
+      </div>
+    </section>
+
+    <section class="grid">
+      <article class="card c-main">
+        <h2>Что уже есть</h2>
+        <ul>
+          <li>2 панели, асинхронные операции, responsive UI без фризов.</li>
+          <li>SFTP-подключения и bookmarks (<code>add / edit / delete / connect</code>).</li>
+          <li>Поиск файлов через <code>fd</code> и по содержимому через <code>rg</code>.</li>
+          <li>Viewer (<code>text/hex</code>, поиск) и внешний editor по <code>F4</code>.</li>
+          <li>Archive VFS для <code>zip/tar/tgz</code> (read-only browse + copy out).</li>
+        </ul>
+      </article>
+
+      <article class="card c-side">
+        <h2>Быстрые клавиши</h2>
+        <p><span class="kbd">Tab</span> панели · <span class="kbd">F5/F6/F8</span> copy/move/delete · <span class="kbd">F9</span> меню · <span class="kbd">F10</span> выход</p>
+        <p><span class="kbd">F3</span> viewer · <span class="kbd">F4</span> editor · <span class="kbd">/</span> поиск · <span class="kbd">Ctrl+O</span> shell</p>
+      </article>
+
+      <article class="card c-side">
+        <h2>Почему так</h2>
+        <p>Для 1-страничника самый простой и быстрый путь: один <code>index.html</code> без сборки и зависимостей.</p>
+        <p class="mkdocs"><strong>Когда нужен MkDocs:</strong> если хочешь много страниц документации, навигацию, поиск и автопубликацию docs.</p>
+      </article>
+
+      <article class="card c-main">
+        <h2>Что можно добавить дальше</h2>
+        <ul>
+          <li>GIF/видео демо реального workflow в терминале.</li>
+          <li>Сравнение с классическим MC (таблица feature-by-feature).</li>
+          <li>Секцию "Use cases": локальная чистка, remote deploy, triage логов.</li>
+          <li>Кнопку "Open Issues" и roadmap ближайшего релиза.</li>
+        </ul>
+      </article>
+    </section>
+
+    <footer class="foot">VCMC • <span id="year"></span></footer>
+  </main>
+
+  <script>
+    const buttons = document.querySelectorAll('[data-copy]');
+    buttons.forEach((button) => {
+      button.addEventListener('click', async () => {
+        const value = button.getAttribute('data-copy') || '';
+        try {
+          await navigator.clipboard.writeText(value);
+          const original = button.textContent;
+          button.textContent = 'Скопировано';
+          setTimeout(() => {
+            button.textContent = original;
+          }, 900);
+        } catch (_) {
+          button.textContent = value;
+        }
+      });
+    });
+    const year = document.getElementById('year');
+    if (year) year.textContent = new Date().getFullYear();
+  </script>
+</body>
+</html>
