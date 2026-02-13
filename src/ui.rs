@@ -1140,7 +1140,7 @@ fn render_selection_line(
 
 fn entry_name(entry: &FsEntry) -> String {
     if entry.is_virtual {
-        return "..".to_string();
+        return entry.name.clone();
     }
 
     match entry.entry_type {

@@ -373,6 +373,7 @@ impl FsBackend for ArchiveFsBackend {
                 entries.insert(0, parent_link(PathBuf::from("/")));
             }
         }
+        entries.insert(0, archive_exit_link());
         Ok(entries)
     }
 
@@ -823,6 +824,19 @@ fn parent_link(parent: PathBuf) -> FsEntry {
     FsEntry {
         name: "..".to_string(),
         path: parent,
+        entry_type: FsEntryType::Directory,
+        size_bytes: 0,
+        modified_at: None,
+        is_executable: false,
+        is_hidden: false,
+        is_virtual: true,
+    }
+}
+
+fn archive_exit_link() -> FsEntry {
+    FsEntry {
+        name: ":".to_string(),
+        path: PathBuf::from("/"),
         entry_type: FsEntryType::Directory,
         size_bytes: 0,
         modified_at: None,

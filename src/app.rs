@@ -648,6 +648,13 @@ impl App {
             return Ok(false);
         };
 
+        if entry.is_virtual
+            && entry.name == ":"
+            && matches!(self.active_backend_spec(), BackendSpec::Archive(_))
+        {
+            return self.detach_archive_panel(self.state.active_panel);
+        }
+
         if entry.entry_type != FsEntryType::Directory && !entry.is_virtual {
             if matches!(self.active_backend_spec(), BackendSpec::Local)
                 && is_archive_file_path(entry.path.as_path())

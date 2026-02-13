@@ -95,6 +95,7 @@ Remote workflow:
 Archive workflow:
 - open archive from selected file via `Enter` or `F9 -> Left/Right -> Archive VFS`
 - navigate inside archive with regular panel keys
+- top virtual item `:` exits archive VFS back to local panel
 - copy from archive to local/sftp with `F5` (including batch selection)
 
 ## Architecture
