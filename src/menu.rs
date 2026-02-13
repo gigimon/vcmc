@@ -13,6 +13,10 @@ pub enum MenuAction {
     PanelOpenArchiveVfs(PanelId),
     PanelOpenShell(PanelId),
     PanelOpenCommandLine(PanelId),
+    PanelBookmarkConnect(PanelId),
+    PanelBookmarkAdd(PanelId),
+    PanelBookmarkEdit(PanelId),
+    PanelBookmarkDelete(PanelId),
     PanelFindFd(PanelId),
     PanelSearchRg(PanelId),
     ToggleSort,
@@ -54,7 +58,7 @@ pub struct MenuGroupSpec {
     pub items: &'static [MenuItemSpec],
 }
 
-const LEFT_ITEMS: [MenuItemSpec; 15] = [
+const LEFT_ITEMS: [MenuItemSpec; 19] = [
     MenuItemSpec::action("Activate Left", MenuAction::ActivatePanel(PanelId::Left)),
     MenuItemSpec::action("Home", MenuAction::PanelHome(PanelId::Left)),
     MenuItemSpec::action("Parent", MenuAction::PanelParent(PanelId::Left)),
@@ -65,6 +69,19 @@ const LEFT_ITEMS: [MenuItemSpec; 15] = [
     MenuItemSpec::action("Mkdir", MenuAction::PanelMkdir(PanelId::Left)),
     MenuItemSpec::separator("─── Command ───"),
     MenuItemSpec::action("Connect SFTP", MenuAction::PanelConnectSftp(PanelId::Left)),
+    MenuItemSpec::action(
+        "Bookmark Connect",
+        MenuAction::PanelBookmarkConnect(PanelId::Left),
+    ),
+    MenuItemSpec::action("Bookmark Add", MenuAction::PanelBookmarkAdd(PanelId::Left)),
+    MenuItemSpec::action(
+        "Bookmark Edit",
+        MenuAction::PanelBookmarkEdit(PanelId::Left),
+    ),
+    MenuItemSpec::action(
+        "Bookmark Delete",
+        MenuAction::PanelBookmarkDelete(PanelId::Left),
+    ),
     MenuItemSpec::action(
         "Command Line",
         MenuAction::PanelOpenCommandLine(PanelId::Left),
@@ -85,7 +102,7 @@ const OPTIONS_ITEMS: [MenuItemSpec; 4] = [
     MenuItemSpec::action("Editor Settings", MenuAction::EditorSettings),
 ];
 
-const RIGHT_ITEMS: [MenuItemSpec; 15] = [
+const RIGHT_ITEMS: [MenuItemSpec; 19] = [
     MenuItemSpec::action("Activate Right", MenuAction::ActivatePanel(PanelId::Right)),
     MenuItemSpec::action("Home", MenuAction::PanelHome(PanelId::Right)),
     MenuItemSpec::action("Parent", MenuAction::PanelParent(PanelId::Right)),
@@ -96,6 +113,19 @@ const RIGHT_ITEMS: [MenuItemSpec; 15] = [
     MenuItemSpec::action("Mkdir", MenuAction::PanelMkdir(PanelId::Right)),
     MenuItemSpec::separator("─── Command ───"),
     MenuItemSpec::action("Connect SFTP", MenuAction::PanelConnectSftp(PanelId::Right)),
+    MenuItemSpec::action(
+        "Bookmark Connect",
+        MenuAction::PanelBookmarkConnect(PanelId::Right),
+    ),
+    MenuItemSpec::action("Bookmark Add", MenuAction::PanelBookmarkAdd(PanelId::Right)),
+    MenuItemSpec::action(
+        "Bookmark Edit",
+        MenuAction::PanelBookmarkEdit(PanelId::Right),
+    ),
+    MenuItemSpec::action(
+        "Bookmark Delete",
+        MenuAction::PanelBookmarkDelete(PanelId::Right),
+    ),
     MenuItemSpec::action(
         "Command Line",
         MenuAction::PanelOpenCommandLine(PanelId::Right),

@@ -101,6 +101,7 @@ Per-panel actions:
 - Home / Parent
 - Copy / Move / Delete / Mkdir
 - Connect SFTP (or disconnect if already connected)
+- Bookmark Connect / Bookmark Add / Bookmark Edit / Bookmark Delete
 - Command Line / Shell
 - Search files
 - Search text
@@ -118,9 +119,17 @@ Per-panel actions:
 ### SFTP
 
 - Open `F9 -> Left/Right -> Connect SFTP`
-- Enter address as `host[:port][/path]` or type `local` to switch back
+- Enter address as `host[:port][/path]`, `@bookmark_name`, or `local` to switch back
 - Then complete login/auth prompts (password or key path, depending on server auth methods)
 - Use same copy/move/delete model between local and remote panels
+
+### SFTP Bookmarks
+
+- Add bookmark: `F9 -> Left/Right -> Bookmark Add`
+- Edit bookmark by name: `F9 -> Left/Right -> Bookmark Edit`
+- Delete bookmark by name: `F9 -> Left/Right -> Bookmark Delete`
+- Connect using bookmark: `F9 -> Left/Right -> Bookmark Connect`
+- Quick connect from SFTP dialog: type `@bookmark_name`
 
 ### Archive VFS
 
@@ -183,6 +192,23 @@ editor = "nvim"
 Notes:
 
 - If `$EDITOR` is set, it overrides saved config for current session.
+
+SFTP bookmarks file:
+
+- `$XDG_CONFIG_HOME/vcmc/bookmarks.toml`, or
+- `~/.config/vcmc/bookmarks.toml`
+
+Format:
+
+```toml
+[[bookmark]]
+name = "prod"
+host = "example.com"
+port = 22
+user = "deploy"
+root_path = "/"
+password = ""
+```
 
 ## Command Line Mode (`:`)
 

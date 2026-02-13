@@ -7,7 +7,7 @@ use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use anyhow::{Result, bail};
 use crossbeam_channel::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ssh2::Session;
@@ -50,6 +50,7 @@ pub struct App {
     pending_rename: Option<PendingRename>,
     pending_mask: Option<PendingMask>,
     pending_sftp_connect: Option<PendingSftpConnect>,
+    pending_bookmark: Option<PendingBookmark>,
     pending_conflict: Option<PendingConflict>,
     pending_find: Option<PendingFind>,
     pending_editor_choice: Option<PendingEditorChoice>,
@@ -96,6 +97,54 @@ struct PendingFind {
     root: PathBuf,
     default_hidden: bool,
     default_case_sensitive: bool,
+}
+
+struct PendingBookmark {
+    panel_id: PanelId,
+    action: BookmarkAction,
+    stage: BookmarkStage,
+    lookup_name: Option<String>,
+    draft: SftpBookmark,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BookmarkAction {
+    Connect,
+    Add,
+    Edit,
+    Delete,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BookmarkStage {
+    Name,
+    Address,
+    Login,
+    Password,
+    ConfirmDelete,
+}
+
+#[derive(Clone)]
+struct SftpBookmark {
+    name: String,
+    host: String,
+    port: u16,
+    user: String,
+    root_path: PathBuf,
+    password: Option<String>,
+}
+
+impl SftpBookmark {
+    fn empty() -> Self {
+        Self {
+            name: String::new(),
+            host: String::new(),
+            port: 22,
+            user: String::new(),
+            root_path: PathBuf::from("/"),
+            password: None,
+        }
+    }
 }
 
 struct PendingEditorChoice {
@@ -217,6 +266,7 @@ impl App {
             pending_rename: None,
             pending_mask: None,
             pending_sftp_connect: None,
+            pending_bookmark: None,
             pending_conflict: None,
             pending_find: None,
             pending_editor_choice: None,
@@ -317,6 +367,7 @@ impl App {
                 self.pending_rename = None;
                 self.pending_mask = None;
                 self.pending_sftp_connect = None;
+                self.pending_bookmark = None;
                 self.pending_conflict = None;
                 self.pending_find = None;
                 self.pending_editor_choice = None;
@@ -964,6 +1015,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
         self.pending_conflict = None;
         self.pending_find = None;
         self.pending_editor_choice = None;
@@ -1054,6 +1106,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
         self.pending_conflict = None;
         self.pending_find = None;
         self.pending_editor_choice = Some(PendingEditorChoice {
@@ -1228,6 +1281,7 @@ impl App {
         self.pending_conflict = None;
         self.pending_find = None;
         self.pending_editor_choice = None;
+        self.pending_bookmark = None;
         self.pending_viewer_search = false;
         let default_value = match self.backend_spec(panel_id) {
             BackendSpec::Sftp(info) => {
@@ -1247,7 +1301,7 @@ impl App {
         });
         self.state.dialog = Some(input_dialog(
             "SFTP Connect",
-            "Enter address: host[:port][/path] or 'local'",
+            "Enter address: host[:port][/path], 'local', or '@bookmark_name'",
             default_value,
             DialogTone::Default,
         ));
@@ -1264,6 +1318,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
         self.pending_conflict = None;
         self.pending_find = None;
         self.pending_editor_choice = None;
@@ -1290,6 +1345,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
         self.pending_conflict = None;
         self.pending_find = None;
         self.pending_editor_choice = None;
@@ -1322,6 +1378,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
         self.pending_conflict = None;
         self.pending_viewer_search = false;
         let default_hidden = self.panel(panel_id).show_hidden;
@@ -1360,6 +1417,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
         self.pending_conflict = None;
         self.pending_viewer_search = false;
         let default_hidden = self.panel(panel_id).show_hidden;
@@ -1377,6 +1435,144 @@ impl App {
             DialogTone::Default,
         ));
         self.state.status_line = "search text: enter pattern and optional rg flags".to_string();
+        Ok(true)
+    }
+
+    fn start_bookmark_connect_prompt(&mut self) -> Result<bool> {
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
+        self.pending_conflict = None;
+        self.pending_find = None;
+        self.pending_editor_choice = None;
+        self.pending_viewer_search = false;
+        self.state.dialog = None;
+
+        let bookmarks = load_sftp_bookmarks()?;
+        if bookmarks.is_empty() {
+            self.show_alert("no SFTP bookmarks configured");
+            return Ok(true);
+        }
+        let hint = bookmark_names_hint(&bookmarks);
+        self.pending_bookmark = Some(PendingBookmark {
+            panel_id: self.state.active_panel,
+            action: BookmarkAction::Connect,
+            stage: BookmarkStage::Name,
+            lookup_name: None,
+            draft: SftpBookmark::empty(),
+        });
+        self.state.dialog = Some(input_dialog(
+            "Bookmark Connect",
+            hint.as_str(),
+            String::new(),
+            DialogTone::Default,
+        ));
+        self.state.status_line = "bookmark: enter name to connect".to_string();
+        Ok(true)
+    }
+
+    fn start_bookmark_add_prompt(&mut self) -> Result<bool> {
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
+        self.pending_conflict = None;
+        self.pending_find = None;
+        self.pending_editor_choice = None;
+        self.pending_viewer_search = false;
+        self.state.dialog = None;
+
+        self.pending_bookmark = Some(PendingBookmark {
+            panel_id: self.state.active_panel,
+            action: BookmarkAction::Add,
+            stage: BookmarkStage::Name,
+            lookup_name: None,
+            draft: SftpBookmark::empty(),
+        });
+        self.state.dialog = Some(input_dialog(
+            "Bookmark Add",
+            "Enter bookmark name",
+            String::new(),
+            DialogTone::Default,
+        ));
+        self.state.status_line = "bookmark add: enter name".to_string();
+        Ok(true)
+    }
+
+    fn start_bookmark_edit_prompt(&mut self) -> Result<bool> {
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
+        self.pending_conflict = None;
+        self.pending_find = None;
+        self.pending_editor_choice = None;
+        self.pending_viewer_search = false;
+        self.state.dialog = None;
+
+        let bookmarks = load_sftp_bookmarks()?;
+        if bookmarks.is_empty() {
+            self.show_alert("no SFTP bookmarks configured");
+            return Ok(true);
+        }
+        let hint = bookmark_names_hint(&bookmarks);
+        self.pending_bookmark = Some(PendingBookmark {
+            panel_id: self.state.active_panel,
+            action: BookmarkAction::Edit,
+            stage: BookmarkStage::Name,
+            lookup_name: None,
+            draft: SftpBookmark::empty(),
+        });
+        self.state.dialog = Some(input_dialog(
+            "Bookmark Edit",
+            hint.as_str(),
+            String::new(),
+            DialogTone::Default,
+        ));
+        self.state.status_line = "bookmark edit: enter name".to_string();
+        Ok(true)
+    }
+
+    fn start_bookmark_delete_prompt(&mut self) -> Result<bool> {
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
+        self.pending_conflict = None;
+        self.pending_find = None;
+        self.pending_editor_choice = None;
+        self.pending_viewer_search = false;
+        self.state.dialog = None;
+
+        let bookmarks = load_sftp_bookmarks()?;
+        if bookmarks.is_empty() {
+            self.show_alert("no SFTP bookmarks configured");
+            return Ok(true);
+        }
+        let hint = bookmark_names_hint(&bookmarks);
+        self.pending_bookmark = Some(PendingBookmark {
+            panel_id: self.state.active_panel,
+            action: BookmarkAction::Delete,
+            stage: BookmarkStage::Name,
+            lookup_name: None,
+            draft: SftpBookmark::empty(),
+        });
+        self.state.dialog = Some(input_dialog(
+            "Bookmark Delete",
+            hint.as_str(),
+            String::new(),
+            DialogTone::Warning,
+        ));
+        self.state.status_line = "bookmark delete: enter name".to_string();
         Ok(true)
     }
 
@@ -1414,6 +1610,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
         self.pending_conflict = None;
         self.pending_find = None;
         self.pending_editor_choice = None;
@@ -1624,6 +1821,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
         self.pending_conflict = None;
         self.pending_find = None;
         self.pending_editor_choice = None;
@@ -2533,6 +2731,17 @@ impl App {
             };
         }
 
+        if self.pending_bookmark.is_some() {
+            return if role == DialogButtonRole::Primary {
+                self.apply_bookmark()
+            } else {
+                self.pending_bookmark = None;
+                self.state.dialog = None;
+                self.push_log("bookmark flow canceled");
+                true
+            };
+        }
+
         if self.pending_find.is_some() {
             return if role == DialogButtonRole::Primary {
                 self.apply_find()
@@ -2604,6 +2813,13 @@ impl App {
             self.pending_sftp_connect = None;
             self.state.dialog = None;
             self.push_log("sftp connect canceled");
+            return true;
+        }
+
+        if self.pending_bookmark.is_some() {
+            self.pending_bookmark = None;
+            self.state.dialog = None;
+            self.push_log("bookmark flow canceled");
             return true;
         }
 
@@ -2779,6 +2995,16 @@ impl App {
                     };
                 }
 
+                if let Some(name) = value.strip_prefix('@').map(str::trim) {
+                    match self.connect_using_bookmark_name(pending.panel_id, name) {
+                        Ok(redraw) => return redraw,
+                        Err(err) => {
+                            self.show_alert(format!("bookmark connect failed: {err}"));
+                            return true;
+                        }
+                    }
+                }
+
                 match parse_sftp_address_input(value.as_str()) {
                     Ok((user_from_address, host, port, root_path)) => {
                         pending.draft.host = host;
@@ -2845,6 +3071,284 @@ impl App {
                 }
             }
         }
+    }
+
+    fn apply_bookmark(&mut self) -> bool {
+        let pending = self.pending_bookmark.take();
+        let value = self
+            .state
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.input_value.as_ref())
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        self.state.dialog = None;
+
+        let Some(pending) = pending else {
+            return true;
+        };
+
+        let result = match pending.action {
+            BookmarkAction::Connect => self.bookmark_apply_connect(pending, value),
+            BookmarkAction::Add => self.bookmark_apply_add(pending, value),
+            BookmarkAction::Edit => self.bookmark_apply_edit(pending, value),
+            BookmarkAction::Delete => self.bookmark_apply_delete(pending, value),
+        };
+
+        match result {
+            Ok(redraw) => redraw,
+            Err(err) => {
+                self.show_alert(format!("bookmark failed: {err}"));
+                true
+            }
+        }
+    }
+
+    fn bookmark_apply_connect(&mut self, pending: PendingBookmark, value: String) -> Result<bool> {
+        if pending.stage != BookmarkStage::Name {
+            bail!("invalid bookmark connect stage");
+        }
+        if value.is_empty() {
+            bail!("bookmark name cannot be empty");
+        }
+        self.connect_using_bookmark_name(pending.panel_id, value.as_str())
+    }
+
+    fn bookmark_apply_add(&mut self, mut pending: PendingBookmark, value: String) -> Result<bool> {
+        match pending.stage {
+            BookmarkStage::Name => {
+                if value.is_empty() {
+                    bail!("bookmark name cannot be empty");
+                }
+                let bookmarks = load_sftp_bookmarks()?;
+                if bookmarks.iter().any(|bookmark| bookmark.name == value) {
+                    bail!("bookmark '{}' already exists", value);
+                }
+                pending.draft.name = value;
+                pending.stage = BookmarkStage::Address;
+                self.pending_bookmark = Some(pending);
+                self.state.dialog = Some(input_dialog(
+                    "Bookmark Add",
+                    "Server address host[:port][/path]",
+                    "example.com:22/".to_string(),
+                    DialogTone::Default,
+                ));
+                self.state.status_line = "bookmark add: enter server".to_string();
+                Ok(true)
+            }
+            BookmarkStage::Address => {
+                let (user, host, port, root_path) = parse_sftp_address_input(value.as_str())?;
+                pending.draft.host = host;
+                pending.draft.port = port;
+                pending.draft.root_path = root_path;
+                if let Some(user) = user {
+                    pending.draft.user = user;
+                }
+                pending.stage = BookmarkStage::Login;
+                let default_login = if pending.draft.user.is_empty() {
+                    env::var("USER").unwrap_or_default()
+                } else {
+                    pending.draft.user.clone()
+                };
+                self.pending_bookmark = Some(pending);
+                self.state.dialog = Some(input_dialog(
+                    "Bookmark Add",
+                    "Login name",
+                    default_login,
+                    DialogTone::Default,
+                ));
+                self.state.status_line = "bookmark add: enter login".to_string();
+                Ok(true)
+            }
+            BookmarkStage::Login => {
+                if value.is_empty() {
+                    bail!("login cannot be empty");
+                }
+                pending.draft.user = value;
+                pending.stage = BookmarkStage::Password;
+                self.pending_bookmark = Some(pending);
+                self.state.dialog = Some(input_dialog_with_mask(
+                    "Bookmark Add",
+                    "Password (optional, leave empty for SSH agent auth)",
+                    String::new(),
+                    DialogTone::Warning,
+                    true,
+                ));
+                self.state.status_line = "bookmark add: enter password".to_string();
+                Ok(true)
+            }
+            BookmarkStage::Password => {
+                pending.draft.password = if value.is_empty() { None } else { Some(value) };
+                let mut bookmarks = load_sftp_bookmarks()?;
+                bookmarks.push(pending.draft.clone());
+                save_sftp_bookmarks(bookmarks.as_slice())?;
+                self.push_log(format!("bookmark added: {}", pending.draft.name));
+                Ok(true)
+            }
+            BookmarkStage::ConfirmDelete => bail!("invalid stage for bookmark add"),
+        }
+    }
+
+    fn bookmark_apply_edit(&mut self, mut pending: PendingBookmark, value: String) -> Result<bool> {
+        match pending.stage {
+            BookmarkStage::Name => {
+                if value.is_empty() {
+                    bail!("bookmark name cannot be empty");
+                }
+                let bookmarks = load_sftp_bookmarks()?;
+                let bookmark = bookmarks
+                    .into_iter()
+                    .find(|bookmark| bookmark.name == value)
+                    .ok_or_else(|| anyhow::anyhow!("bookmark '{}' not found", value))?;
+                let default_address = format!(
+                    "{}:{}{}",
+                    bookmark.host.as_str(),
+                    bookmark.port,
+                    bookmark.root_path.display()
+                );
+                pending.lookup_name = Some(bookmark.name.clone());
+                pending.draft = bookmark;
+                pending.stage = BookmarkStage::Address;
+                self.pending_bookmark = Some(pending);
+                self.state.dialog = Some(input_dialog(
+                    "Bookmark Edit",
+                    "Server address host[:port][/path]",
+                    default_address,
+                    DialogTone::Default,
+                ));
+                self.state.status_line = "bookmark edit: update server".to_string();
+                Ok(true)
+            }
+            BookmarkStage::Address => {
+                let (user, host, port, root_path) = parse_sftp_address_input(value.as_str())?;
+                pending.draft.host = host;
+                pending.draft.port = port;
+                pending.draft.root_path = root_path;
+                if let Some(user) = user {
+                    pending.draft.user = user;
+                }
+                pending.stage = BookmarkStage::Login;
+                let login = pending.draft.user.clone();
+                self.pending_bookmark = Some(pending);
+                self.state.dialog = Some(input_dialog(
+                    "Bookmark Edit",
+                    "Login name",
+                    login,
+                    DialogTone::Default,
+                ));
+                self.state.status_line = "bookmark edit: update login".to_string();
+                Ok(true)
+            }
+            BookmarkStage::Login => {
+                if value.is_empty() {
+                    bail!("login cannot be empty");
+                }
+                pending.draft.user = value;
+                pending.stage = BookmarkStage::Password;
+                let existing_password = pending.draft.password.clone().unwrap_or_default();
+                self.pending_bookmark = Some(pending);
+                self.state.dialog = Some(input_dialog_with_mask(
+                    "Bookmark Edit",
+                    "Password (optional, leave empty for SSH agent auth)",
+                    existing_password,
+                    DialogTone::Warning,
+                    true,
+                ));
+                self.state.status_line = "bookmark edit: update password".to_string();
+                Ok(true)
+            }
+            BookmarkStage::Password => {
+                pending.draft.password = if value.is_empty() { None } else { Some(value) };
+                let target_name = pending
+                    .lookup_name
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("bookmark name is missing"))?;
+                let mut bookmarks = load_sftp_bookmarks()?;
+                let Some(existing) = bookmarks
+                    .iter_mut()
+                    .find(|bookmark| bookmark.name == target_name)
+                else {
+                    bail!("bookmark '{}' not found", target_name);
+                };
+                *existing = pending.draft.clone();
+                save_sftp_bookmarks(bookmarks.as_slice())?;
+                self.push_log(format!("bookmark updated: {}", pending.draft.name));
+                Ok(true)
+            }
+            BookmarkStage::ConfirmDelete => bail!("invalid stage for bookmark edit"),
+        }
+    }
+
+    fn bookmark_apply_delete(
+        &mut self,
+        mut pending: PendingBookmark,
+        value: String,
+    ) -> Result<bool> {
+        match pending.stage {
+            BookmarkStage::Name => {
+                if value.is_empty() {
+                    bail!("bookmark name cannot be empty");
+                }
+                let bookmarks = load_sftp_bookmarks()?;
+                let bookmark = bookmarks
+                    .into_iter()
+                    .find(|bookmark| bookmark.name == value)
+                    .ok_or_else(|| anyhow::anyhow!("bookmark '{}' not found", value))?;
+                pending.lookup_name = Some(bookmark.name.clone());
+                pending.draft = bookmark.clone();
+                pending.stage = BookmarkStage::ConfirmDelete;
+                self.pending_bookmark = Some(pending);
+                self.state.dialog = Some(confirm_dialog(format!(
+                    "Delete bookmark '{}' ({}@{}:{})?",
+                    bookmark.name, bookmark.user, bookmark.host, bookmark.port
+                )));
+                self.state.status_line = "bookmark delete: confirm".to_string();
+                Ok(true)
+            }
+            BookmarkStage::ConfirmDelete => {
+                let target_name = pending
+                    .lookup_name
+                    .clone()
+                    .ok_or_else(|| anyhow::anyhow!("bookmark name is missing"))?;
+                let mut bookmarks = load_sftp_bookmarks()?;
+                let before = bookmarks.len();
+                bookmarks.retain(|bookmark| bookmark.name != target_name);
+                if bookmarks.len() == before {
+                    bail!("bookmark '{}' not found", target_name);
+                }
+                save_sftp_bookmarks(bookmarks.as_slice())?;
+                self.push_log(format!("bookmark deleted: {}", target_name));
+                Ok(true)
+            }
+            BookmarkStage::Address | BookmarkStage::Login | BookmarkStage::Password => {
+                bail!("invalid stage for bookmark delete")
+            }
+        }
+    }
+
+    fn connect_using_bookmark_name(&mut self, panel_id: PanelId, name: &str) -> Result<bool> {
+        if name.trim().is_empty() {
+            bail!("bookmark name cannot be empty");
+        }
+        let bookmarks = load_sftp_bookmarks()?;
+        let bookmark = bookmarks
+            .into_iter()
+            .find(|bookmark| bookmark.name == name)
+            .ok_or_else(|| anyhow::anyhow!("bookmark '{}' not found", name))?;
+        let auth = match bookmark.password {
+            Some(password) if !password.is_empty() => SftpAuth::Password(password),
+            _ => SftpAuth::Agent,
+        };
+        let conn = SftpConnectionInfo {
+            host: bookmark.host.clone(),
+            user: bookmark.user.clone(),
+            port: bookmark.port,
+            root_path: bookmark.root_path.clone(),
+            auth,
+        };
+        let redraw = self.attach_panel_to_sftp(panel_id, conn)?;
+        self.push_log(format!("bookmark connected: {}", bookmark.name));
+        Ok(redraw)
     }
 
     fn apply_find(&mut self) -> bool {
@@ -3107,6 +3611,7 @@ impl App {
         if self.pending_rename.is_none()
             && self.pending_mask.is_none()
             && self.pending_sftp_connect.is_none()
+            && self.pending_bookmark.is_none()
             && self.pending_find.is_none()
             && self.pending_editor_choice.is_none()
             && !self.pending_viewer_search
@@ -3126,6 +3631,7 @@ impl App {
         if self.pending_rename.is_none()
             && self.pending_mask.is_none()
             && self.pending_sftp_connect.is_none()
+            && self.pending_bookmark.is_none()
             && self.pending_find.is_none()
             && self.pending_editor_choice.is_none()
             && !self.pending_viewer_search
@@ -3368,6 +3874,18 @@ impl App {
                 self.state.command_line.input.clear();
                 self.state.status_line = "command line active".to_string();
                 Ok(true)
+            }
+            MenuAction::PanelBookmarkConnect(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::start_bookmark_connect_prompt)
+            }
+            MenuAction::PanelBookmarkAdd(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::start_bookmark_add_prompt)
+            }
+            MenuAction::PanelBookmarkEdit(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::start_bookmark_edit_prompt)
+            }
+            MenuAction::PanelBookmarkDelete(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::start_bookmark_delete_prompt)
             }
             MenuAction::PanelFindFd(panel_id) => {
                 self.run_with_panel_focus(panel_id, Self::start_find_fd_prompt)
@@ -3753,6 +4271,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
         self.pending_conflict = None;
         self.pending_find = None;
         self.pending_editor_choice = None;
@@ -3888,6 +4407,143 @@ fn build_editor_choice_body(options: &[EditorCandidate]) -> String {
     lines.join("\n")
 }
 
+fn bookmark_names_hint(bookmarks: &[SftpBookmark]) -> String {
+    let mut names: Vec<&str> = bookmarks
+        .iter()
+        .map(|bookmark| bookmark.name.as_str())
+        .collect();
+    names.sort_unstable();
+    let preview = names.into_iter().take(8).collect::<Vec<_>>().join(", ");
+    if preview.is_empty() {
+        "Enter bookmark name".to_string()
+    } else {
+        format!("Enter bookmark name ({preview})")
+    }
+}
+
+fn load_sftp_bookmarks() -> Result<Vec<SftpBookmark>> {
+    let Some(path) = sftp_bookmarks_path() else {
+        return Ok(Vec::new());
+    };
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let content = fs::read_to_string(path.as_path())?;
+    let mut bookmarks = Vec::new();
+    let mut current: Option<SftpBookmark> = None;
+
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        if trimmed == "[[bookmark]]" {
+            if let Some(bookmark) = current.take() {
+                validate_bookmark(&bookmark)?;
+                bookmarks.push(bookmark);
+            }
+            current = Some(SftpBookmark::empty());
+            continue;
+        }
+
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        let Some(bookmark) = current.as_mut() else {
+            continue;
+        };
+        let key = key.trim();
+        let raw_value = value.trim();
+
+        match key {
+            "name" => bookmark.name = parse_editor_value(raw_value).unwrap_or_default(),
+            "host" => bookmark.host = parse_editor_value(raw_value).unwrap_or_default(),
+            "port" => {
+                let parsed = raw_value
+                    .parse::<u16>()
+                    .map_err(|_| anyhow::anyhow!("invalid bookmark port: {raw_value}"))?;
+                bookmark.port = parsed;
+            }
+            "user" => bookmark.user = parse_editor_value(raw_value).unwrap_or_default(),
+            "root_path" => {
+                let raw = parse_editor_value(raw_value).unwrap_or_else(|| "/".to_string());
+                bookmark.root_path = PathBuf::from(raw);
+            }
+            "password" => {
+                let raw = parse_editor_value(raw_value).unwrap_or_default();
+                bookmark.password = if raw.is_empty() { None } else { Some(raw) };
+            }
+            _ => {}
+        }
+    }
+
+    if let Some(bookmark) = current.take() {
+        validate_bookmark(&bookmark)?;
+        bookmarks.push(bookmark);
+    }
+
+    bookmarks.sort_by(|left, right| left.name.cmp(&right.name));
+    Ok(bookmarks)
+}
+
+fn save_sftp_bookmarks(bookmarks: &[SftpBookmark]) -> Result<()> {
+    let Some(path) = sftp_bookmarks_path() else {
+        bail!("cannot resolve bookmarks config path (HOME/XDG_CONFIG_HOME)");
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let mut sorted = bookmarks.to_vec();
+    sorted.sort_by(|left, right| left.name.cmp(&right.name));
+    let mut lines = vec![
+        "# vcmc sftp bookmarks".to_string(),
+        "# password empty => SSH agent auth".to_string(),
+        String::new(),
+    ];
+    for bookmark in &sorted {
+        validate_bookmark(bookmark)?;
+        lines.push("[[bookmark]]".to_string());
+        lines.push(format!(
+            "name = \"{}\"",
+            escape_toml_string(bookmark.name.trim())
+        ));
+        lines.push(format!(
+            "host = \"{}\"",
+            escape_toml_string(bookmark.host.trim())
+        ));
+        lines.push(format!("port = {}", bookmark.port));
+        lines.push(format!(
+            "user = \"{}\"",
+            escape_toml_string(bookmark.user.trim())
+        ));
+        lines.push(format!(
+            "root_path = \"{}\"",
+            escape_toml_string(bookmark.root_path.to_string_lossy().as_ref())
+        ));
+        lines.push(format!(
+            "password = \"{}\"",
+            escape_toml_string(bookmark.password.as_deref().unwrap_or(""))
+        ));
+        lines.push(String::new());
+    }
+    fs::write(path, lines.join("\n"))?;
+    Ok(())
+}
+
+fn validate_bookmark(bookmark: &SftpBookmark) -> Result<()> {
+    if bookmark.name.trim().is_empty() {
+        bail!("bookmark name cannot be empty");
+    }
+    if bookmark.host.trim().is_empty() {
+        bail!("bookmark host cannot be empty");
+    }
+    if bookmark.user.trim().is_empty() {
+        bail!("bookmark user cannot be empty");
+    }
+    Ok(())
+}
+
 fn load_saved_editor_command() -> Option<String> {
     let path = editor_config_path()?;
     let content = fs::read_to_string(path).ok()?;
@@ -3924,16 +4580,24 @@ fn save_editor_command(command: &str) -> Result<()> {
     Ok(())
 }
 
-fn editor_config_path() -> Option<PathBuf> {
+fn config_dir_path() -> Option<PathBuf> {
     if let Some(base) = env::var_os("XDG_CONFIG_HOME") {
         let base = PathBuf::from(base);
         if !base.as_os_str().is_empty() {
-            return Some(base.join("vcmc").join("config.toml"));
+            return Some(base.join("vcmc"));
         }
     }
     env::var_os("HOME")
         .map(PathBuf::from)
-        .map(|home| home.join(".config").join("vcmc").join("config.toml"))
+        .map(|home| home.join(".config").join("vcmc"))
+}
+
+fn editor_config_path() -> Option<PathBuf> {
+    config_dir_path().map(|path| path.join("config.toml"))
+}
+
+fn sftp_bookmarks_path() -> Option<PathBuf> {
+    config_dir_path().map(|path| path.join("bookmarks.toml"))
 }
 
 fn parse_editor_value(raw: &str) -> Option<String> {
