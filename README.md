@@ -7,6 +7,8 @@ VCMC is a fast terminal file manager inspired by Midnight Commander, implemented
 Implemented:
 - two-panel layout with active panel focus
 - navigation (`Tab`, `Up/Down`, `Enter`, `Backspace`, `Home`, `~`)
+- command line (`:`) with `cd` and shell command execution
+- interactive shell mode (`Ctrl+O`) with safe TUI suspend/resume
 - file operations (`copy`, `move`, `delete`, `mkdir`) via background jobs
 - MC-like multi-select (`Space/Ins`, range selection, select/deselect by mask, invert)
 - batch `F5/F6/F8` over selected items with preflight checks and summary confirm
@@ -40,6 +42,8 @@ General:
 - `Backspace`: go to parent directory
 - `Home` or `~`: go to home directory
 - `/`: start incremental search for active panel
+- `:`: open command line (`cd`, shell commands, path jump)
+- `Ctrl+O`: open interactive local shell in current directory
 - `F2`: cycle sort mode (`name -> size -> mtime`)
 - `F3`: open viewer for current file
 - `F4`: open external editor (`$EDITOR`) for current file
@@ -99,6 +103,7 @@ Security notes:
 - POSIX-first (`macOS`, `Linux`) for v1
 - delete is permanent (no Trash integration)
 - overwrite flow is not implemented; conflicts are aborted explicitly
+- command line shell execution is available only on local backend
 - viewer preview reads up to `256 KB` per file in v1
 - `F4` requires `$EDITOR` to be set in environment
 - SFTP backend uses short connection retries with timeout guards
