@@ -8,7 +8,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use crate::menu::top_menu_groups;
 use crate::model::{
     AppState, BatchProgressState, CommandLineState, DialogButtonRole, DialogState, DialogTone,
-    FsEntry, FsEntryType, JobKind, PanelId, PanelState, ScreenMode, SortMode, ViewerState,
+    FindProgressState, FsEntry, FsEntryType, JobKind, PanelId, PanelState, ScreenMode, SortMode,
+    ViewerState,
 };
 use crate::theme::{DirColorsTheme, ThemeColor, ThemeStyle};
 
@@ -247,10 +248,11 @@ fn render_panel(
     };
 
     let title = format!(
-        "{name} [{}] <{}> {}{}",
+        "{name} [{}] <{}> {}{}{}",
         sort_label(panel.sort_mode),
         panel.backend_label,
         panel.cwd.display(),
+        find_suffix(panel),
         search_suffix(panel),
     );
 
@@ -454,6 +456,13 @@ fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
     if mode == FooterMode::Viewer {
         cells.push(FooterCellSpec {
             text: viewer_status_label(state.viewer.as_ref()),
+            kind: FooterCellKind::Status,
+            enabled: true,
+            active: false,
+        });
+    } else if let Some(progress) = state.find_progress.as_ref() {
+        cells.push(FooterCellSpec {
+            text: find_status_label(progress),
             kind: FooterCellKind::Status,
             enabled: true,
             active: false,
@@ -1198,6 +1207,43 @@ fn search_suffix(panel: &PanelState) -> String {
         String::new()
     } else {
         format!("  /{}", panel.search_query)
+    }
+}
+
+fn find_suffix(panel: &PanelState) -> String {
+    let Some(find) = panel.find_view.as_ref() else {
+        return String::new();
+    };
+
+    let mut flags = Vec::new();
+    if find.glob {
+        flags.push("glob");
+    }
+    if find.hidden {
+        flags.push("hidden");
+    }
+    if find.follow_symlinks {
+        flags.push("follow");
+    }
+    if flags.is_empty() {
+        format!(" [fd:{}]", find.query)
+    } else {
+        format!(" [fd:{}:{}]", find.query, flags.join(","))
+    }
+}
+
+fn find_status_label(progress: &FindProgressState) -> String {
+    let panel = match progress.panel_id {
+        PanelId::Left => "L",
+        PanelId::Right => "R",
+    };
+    if progress.running {
+        format!("FIND {panel} '{}' {}...", progress.query, progress.matches)
+    } else {
+        format!(
+            "FIND {panel} '{}' {} done",
+            progress.query, progress.matches
+        )
     }
 }
 

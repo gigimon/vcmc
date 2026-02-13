@@ -84,6 +84,7 @@ pub struct FsEntry {
 pub struct PanelState {
     pub backend_label: String,
     pub cwd: PathBuf,
+    pub find_view: Option<FindPanelState>,
     pub all_entries: Vec<FsEntry>,
     pub entries: Vec<FsEntry>,
     pub selected_index: usize,
@@ -100,6 +101,7 @@ impl PanelState {
         Self {
             backend_label: "local".to_string(),
             cwd,
+            find_view: None,
             all_entries: Vec::new(),
             entries: Vec::new(),
             selected_index: 0,
@@ -287,6 +289,15 @@ impl PanelState {
 }
 
 #[derive(Debug, Clone)]
+pub struct FindPanelState {
+    pub root: PathBuf,
+    pub query: String,
+    pub glob: bool,
+    pub hidden: bool,
+    pub follow_symlinks: bool,
+}
+
+#[derive(Debug, Clone)]
 pub struct TerminalSize {
     pub width: u16,
     pub height: u16,
@@ -320,6 +331,7 @@ pub struct AppState {
     pub dialog: Option<DialogState>,
     pub viewer: Option<ViewerState>,
     pub batch_progress: Option<BatchProgressState>,
+    pub find_progress: Option<FindProgressState>,
     pub command_line: CommandLineState,
     pub jobs: Vec<Job>,
     pub terminal_size: TerminalSize,
@@ -338,6 +350,7 @@ impl AppState {
             dialog: None,
             viewer: None,
             batch_progress: None,
+            find_progress: None,
             command_line: CommandLineState::default(),
             jobs: Vec::new(),
             terminal_size: TerminalSize {
@@ -462,6 +475,7 @@ pub enum Event {
     Tick,
     Resize { width: u16, height: u16 },
     Job(JobUpdate),
+    Find(FindUpdate),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -519,6 +533,43 @@ pub struct JobUpdate {
     pub message: Option<String>,
 }
 
+#[derive(Debug, Clone)]
+pub struct FindRequest {
+    pub id: u64,
+    pub panel_id: PanelId,
+    pub root: PathBuf,
+    pub query: String,
+    pub glob: bool,
+    pub hidden: bool,
+    pub follow_symlinks: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum FindUpdate {
+    Progress {
+        id: u64,
+        panel_id: PanelId,
+        query: String,
+        matches: usize,
+    },
+    Done {
+        id: u64,
+        panel_id: PanelId,
+        query: String,
+        root: PathBuf,
+        glob: bool,
+        hidden: bool,
+        follow_symlinks: bool,
+        entries: Vec<FsEntry>,
+    },
+    Failed {
+        id: u64,
+        panel_id: PanelId,
+        query: String,
+        error: String,
+    },
+}
+
 impl JobUpdate {
     pub fn into_job(self) -> Job {
         Job {
@@ -544,6 +595,14 @@ pub struct BatchProgressState {
     pub completed: usize,
     pub total: usize,
     pub failed: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct FindProgressState {
+    pub panel_id: PanelId,
+    pub query: String,
+    pub matches: usize,
+    pub running: bool,
 }
 
 fn normalize_mask(mask: &str) -> String {

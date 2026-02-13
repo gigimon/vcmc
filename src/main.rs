@@ -1,6 +1,7 @@
 mod app;
 mod backend;
 mod errors;
+mod find;
 mod fs;
 mod jobs;
 mod menu;

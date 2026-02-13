@@ -13,7 +13,7 @@ pub enum MenuAction {
     PanelOpenArchiveVfs(PanelId),
     PanelOpenShell(PanelId),
     PanelOpenCommandLine(PanelId),
-    PanelFindFdPlanned(PanelId),
+    PanelFindFd(PanelId),
     ToggleSort,
     Refresh,
     ViewerModesPlanned,
@@ -69,7 +69,7 @@ const LEFT_ITEMS: [MenuItemSpec; 14] = [
         MenuAction::PanelOpenCommandLine(PanelId::Left),
     ),
     MenuItemSpec::action("Shell", MenuAction::PanelOpenShell(PanelId::Left)),
-    MenuItemSpec::action("Find (fd)", MenuAction::PanelFindFdPlanned(PanelId::Left)),
+    MenuItemSpec::action("Find (fd)", MenuAction::PanelFindFd(PanelId::Left)),
     MenuItemSpec::action(
         "Archive VFS",
         MenuAction::PanelOpenArchiveVfs(PanelId::Left),
@@ -99,7 +99,7 @@ const RIGHT_ITEMS: [MenuItemSpec; 14] = [
         MenuAction::PanelOpenCommandLine(PanelId::Right),
     ),
     MenuItemSpec::action("Shell", MenuAction::PanelOpenShell(PanelId::Right)),
-    MenuItemSpec::action("Find (fd)", MenuAction::PanelFindFdPlanned(PanelId::Right)),
+    MenuItemSpec::action("Find (fd)", MenuAction::PanelFindFd(PanelId::Right)),
     MenuItemSpec::action(
         "Archive VFS",
         MenuAction::PanelOpenArchiveVfs(PanelId::Right),

@@ -23,6 +23,7 @@ Implemented:
 - top menu bar (MC-like) with keyboard navigation and action groups
 - backend abstraction with SFTP panel mode (top menu: `Left/Right -> Connect SFTP`)
 - archive VFS panel mode for `zip/tar/tar.gz` (browse + copy out)
+- `fd`-powered find with async progress and panelized results view
 
 ## Run
 
@@ -57,6 +58,7 @@ General:
 - `F9`: open top menu (`Left`, `Options`, `Right`)
 - `F10` or `q`: quit
 - `Alt+L/O/R`: open top menu directly on specific group
+- find dialog: `F9 -> Left/Right -> Find (fd)` then `pattern [--glob] [--hidden] [--follow]`
 - on local panel: `Enter` on archive file (`.zip`, `.tar`, `.tar.gz`, `.tgz`) opens archive VFS
 - in archive VFS: `Backspace` at `/` closes archive and returns to local panel path
 
@@ -98,6 +100,14 @@ Archive workflow:
 - top virtual item `..` exits archive VFS back to local panel
 - copy from archive to local/sftp with `F5` (including batch selection)
 
+Find workflow (`fd`):
+- start via `F9 -> Left/Right -> Find (fd)` on local panel
+- enter query as `pattern [--glob] [--hidden] [--follow]`
+- search runs async and shows live match counter in footer
+- results are shown in panelized view (`[fd:...]` in panel title)
+- `Enter` on result jumps to source path (`file -> parent dir`, `dir -> open dir`)
+- top virtual item `..` exits find-results view back to normal directory listing
+
 ## Architecture
 
 - UI thread: event loop (`input`, `tick`, `resize`, `worker updates`)
@@ -121,6 +131,7 @@ Security notes:
 - SFTP backend uses short connection retries with timeout guards
 - SFTP smoke checks are optional and run only when `VCMC_SFTP_SMOKE_*` env is configured
 - archive VFS is read-only in v1 (no create/delete/move/write inside archive)
+- find via `fd` requires external `fd` binary available in `PATH`
 
 ## Known UX Constraints
 
@@ -132,6 +143,7 @@ Security notes:
 - SFTP smoke integration requires explicit test host env (not auto-run by default)
 - archive VFS open is currently local-only (no direct open from SFTP file yet)
 - copy into archive VFS is not implemented yet (copy out only)
+- find via `fd` is currently local-only (no remote `sftp` search runner in v1)
 
 ## Backlog (next)
 

@@ -12,13 +12,14 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ssh2::Session;
 
 use crate::backend::{FsBackend, backend_from_spec, is_archive_file_path};
+use crate::find::{is_fd_available, parse_find_input, spawn_fd_search};
 use crate::jobs::WorkerPool;
 use crate::menu::{MenuAction, menu_group_index_by_hotkey, top_menu_groups};
 use crate::model::{
     AppState, ArchiveConnectionInfo, BackendSpec, BatchProgressState, Command, DialogButton,
-    DialogButtonRole, DialogState, DialogTone, Event, FsEntry, FsEntryType, Job, JobKind,
-    JobRequest, JobStatus, JobUpdate, PanelId, ScreenMode, SftpAuth, SftpConnectionInfo,
-    TerminalSize, ViewerState,
+    DialogButtonRole, DialogState, DialogTone, Event, FindPanelState, FindProgressState,
+    FindRequest, FindUpdate, FsEntry, FsEntryType, Job, JobKind, JobRequest, JobStatus, JobUpdate,
+    PanelId, ScreenMode, SftpAuth, SftpConnectionInfo, SortMode, TerminalSize, ViewerState,
 };
 use crate::theme::{DirColorsTheme, load_theme_from_environment};
 use crate::viewer::load_viewer_state;
@@ -27,6 +28,7 @@ use crate::{runtime, terminal};
 pub struct App {
     state: AppState,
     running: bool,
+    event_tx: Sender<Event>,
     workers: WorkerPool,
     left_backend: Arc<dyn FsBackend>,
     right_backend: Arc<dyn FsBackend>,
@@ -35,12 +37,16 @@ pub struct App {
     theme: DirColorsTheme,
     next_job_id: u64,
     next_batch_id: u64,
+    next_find_id: u64,
     pending_confirmation: Option<PendingConfirmation>,
     pending_rename: Option<PendingRename>,
     pending_mask: Option<PendingMask>,
     pending_sftp_connect: Option<PendingSftpConnect>,
     pending_conflict: Option<PendingConflict>,
+    pending_find: Option<PendingFind>,
     batch_progress: HashMap<u64, BatchProgress>,
+    left_active_find_id: Option<u64>,
+    right_active_find_id: Option<u64>,
     force_full_redraw: bool,
     last_left_local_cwd: PathBuf,
     last_right_local_cwd: PathBuf,
@@ -72,6 +78,12 @@ struct PendingSftpConnect {
     panel_id: PanelId,
     stage: SftpConnectStage,
     draft: SftpConnectDraft,
+}
+
+struct PendingFind {
+    panel_id: PanelId,
+    root: PathBuf,
+    default_hidden: bool,
 }
 
 #[derive(Clone)]
@@ -158,11 +170,12 @@ impl App {
         let local_spec = BackendSpec::Local;
         let local_backend = backend_from_spec(&local_spec);
         let normalized_cwd = local_backend.normalize_existing_path("bootstrap", &cwd)?;
-        let workers = WorkerPool::new(2, event_tx);
+        let workers = WorkerPool::new(2, event_tx.clone());
         let theme = load_theme_from_environment();
         let mut app = Self {
             state: AppState::new(normalized_cwd.clone()),
             running: true,
+            event_tx,
             workers,
             left_backend: local_backend.clone(),
             right_backend: local_backend,
@@ -171,12 +184,16 @@ impl App {
             theme,
             next_job_id: 1,
             next_batch_id: 1,
+            next_find_id: 1,
             pending_confirmation: None,
             pending_rename: None,
             pending_mask: None,
             pending_sftp_connect: None,
             pending_conflict: None,
+            pending_find: None,
             batch_progress: HashMap::new(),
+            left_active_find_id: None,
+            right_active_find_id: None,
             force_full_redraw: false,
             last_left_local_cwd: normalized_cwd.clone(),
             last_right_local_cwd: normalized_cwd,
@@ -244,6 +261,7 @@ impl App {
                 true
             }
             Event::Job(update) => self.handle_job_update(update),
+            Event::Find(update) => self.handle_find_update(update),
         }
     }
 
@@ -266,6 +284,7 @@ impl App {
                 self.pending_mask = None;
                 self.pending_sftp_connect = None;
                 self.pending_conflict = None;
+                self.pending_find = None;
                 self.state.dialog = None;
                 Ok(true)
             }
@@ -401,6 +420,79 @@ impl App {
         }
 
         true
+    }
+
+    fn handle_find_update(&mut self, update: FindUpdate) -> bool {
+        match update {
+            FindUpdate::Progress {
+                id,
+                panel_id,
+                query,
+                matches,
+            } => {
+                if self.active_find_id(panel_id) != Some(id) {
+                    return false;
+                }
+                self.state.find_progress = Some(FindProgressState {
+                    panel_id,
+                    query,
+                    matches,
+                    running: true,
+                });
+                self.state.status_line = format!("find running: {} match(es)", matches);
+                true
+            }
+            FindUpdate::Done {
+                id,
+                panel_id,
+                query,
+                root,
+                glob,
+                hidden,
+                follow_symlinks,
+                entries,
+            } => {
+                if self.active_find_id(panel_id) != Some(id) {
+                    return false;
+                }
+                self.set_active_find_id(panel_id, None);
+                self.state.find_progress = Some(FindProgressState {
+                    panel_id,
+                    query: query.clone(),
+                    matches: entries.len(),
+                    running: false,
+                });
+                match self.apply_find_results(
+                    panel_id,
+                    root,
+                    query,
+                    glob,
+                    hidden,
+                    follow_symlinks,
+                    entries,
+                ) {
+                    Ok(redraw) => redraw,
+                    Err(err) => {
+                        self.show_alert(format!("find failed: {err}"));
+                        true
+                    }
+                }
+            }
+            FindUpdate::Failed {
+                id,
+                panel_id,
+                query,
+                error,
+            } => {
+                if self.active_find_id(panel_id) != Some(id) {
+                    return false;
+                }
+                self.set_active_find_id(panel_id, None);
+                self.state.find_progress = None;
+                self.show_alert(format!("find '{query}' failed: {error}"));
+                true
+            }
+        }
     }
 
     fn handle_batch_job_update(&mut self, batch_id: u64, mut update: JobUpdate) -> bool {
@@ -598,15 +690,48 @@ impl App {
         }
     }
 
+    fn active_find_id(&self, panel_id: PanelId) -> Option<u64> {
+        match panel_id {
+            PanelId::Left => self.left_active_find_id,
+            PanelId::Right => self.right_active_find_id,
+        }
+    }
+
+    fn set_active_find_id(&mut self, panel_id: PanelId, value: Option<u64>) {
+        match panel_id {
+            PanelId::Left => self.left_active_find_id = value,
+            PanelId::Right => self.right_active_find_id = value,
+        }
+    }
+
     fn path_exists_on_backend(&self, backend: &dyn FsBackend, path: &Path) -> bool {
         backend.stat_entry(path).is_ok()
     }
 
     fn reload_panel(&mut self, panel_id: PanelId, update_status: bool) -> Result<bool> {
-        let (cwd, sort_mode, show_hidden) = {
+        let (cwd, sort_mode, show_hidden, find_view) = {
             let panel = self.panel_mut(panel_id);
-            (panel.cwd.clone(), panel.sort_mode, panel.show_hidden)
+            (
+                panel.cwd.clone(),
+                panel.sort_mode,
+                panel.show_hidden,
+                panel.find_view.clone(),
+            )
         };
+        if let Some(find_view) = find_view {
+            let panel = self.panel_mut(panel_id);
+            panel.apply_search_filter();
+            panel.error_message = None;
+            if update_status {
+                let mode = if find_view.glob { "glob" } else { "name" };
+                self.state.status_line = format!(
+                    "Find view ({mode}): '{}' @ {}",
+                    find_view.query,
+                    find_view.root.display()
+                );
+            }
+            return Ok(true);
+        }
         match self
             .backend(panel_id)
             .list_dir(&cwd, sort_mode, show_hidden)
@@ -643,17 +768,26 @@ impl App {
     }
 
     fn open_selected_directory(&mut self) -> Result<bool> {
+        let panel_id = self.state.active_panel;
+        let in_find_view = self.panel(panel_id).find_view.is_some();
         let selected = self.active_panel().selected_entry().cloned();
         let Some(entry) = selected else {
             return Ok(false);
         };
+
+        if in_find_view {
+            if entry.is_virtual && entry.name == ".." {
+                return self.exit_find_view(panel_id);
+            }
+            return self.open_find_result_entry(panel_id, entry);
+        }
 
         if entry.is_virtual
             && entry.name == ".."
             && matches!(self.active_backend_spec(), BackendSpec::Archive(_))
             && self.active_panel().cwd == Path::new("/")
         {
-            return self.detach_archive_panel(self.state.active_panel);
+            return self.detach_archive_panel(panel_id);
         }
 
         if entry.entry_type != FsEntryType::Directory && !entry.is_virtual {
@@ -681,6 +815,9 @@ impl App {
 
     fn go_to_parent(&mut self) -> Result<bool> {
         let panel_id = self.state.active_panel;
+        if self.panel(panel_id).find_view.is_some() {
+            return self.exit_find_view(panel_id);
+        }
         let current = self.active_panel().cwd.clone();
         if matches!(self.active_backend_spec(), BackendSpec::Archive(_))
             && current == Path::new("/")
@@ -697,6 +834,7 @@ impl App {
             .normalize_existing_path("parent", parent)?;
         let panel = self.active_panel_mut();
         panel.cwd = normalized;
+        panel.find_view = None;
         panel.selected_index = 0;
         panel.clear_selection_anchor();
         self.reload_panel(self.state.active_panel, true)
@@ -750,6 +888,7 @@ impl App {
         self.pending_mask = None;
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
+        self.pending_find = None;
         self.state.dialog = None;
         self.state.viewer = Some(viewer_state);
         self.state.screen_mode = ScreenMode::Viewer;
@@ -902,6 +1041,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_conflict = None;
+        self.pending_find = None;
         let default_value = match self.backend_spec(panel_id) {
             BackendSpec::Sftp(info) => {
                 format!("{}:{}{}", info.host, info.port, info.root_path.display())
@@ -938,6 +1078,7 @@ impl App {
         self.pending_mask = None;
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
+        self.pending_find = None;
         self.state.dialog = None;
 
         let local_cwd = self.last_local_cwd(panel_id);
@@ -961,6 +1102,7 @@ impl App {
         self.pending_mask = None;
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
+        self.pending_find = None;
         self.state.dialog = None;
         self.input_mode = Some(InputMode::Search(panel_id));
         let query = self.panel_mut(panel_id).search_query.clone();
@@ -969,6 +1111,40 @@ impl App {
         } else {
             self.state.status_line = format!("search: {query}");
         }
+        Ok(true)
+    }
+
+    fn start_find_fd_prompt(&mut self) -> Result<bool> {
+        let panel_id = self.state.active_panel;
+        if !matches!(self.backend_spec(panel_id), BackendSpec::Local) {
+            self.show_alert("Find via fd is available for local panel only");
+            return Ok(true);
+        }
+
+        if !is_fd_available() {
+            self.show_alert("fd is not installed. Install: brew install fd or apt install fd-find");
+            return Ok(true);
+        }
+
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.pending_sftp_connect = None;
+        self.pending_conflict = None;
+        let default_hidden = self.panel(panel_id).show_hidden;
+        self.pending_find = Some(PendingFind {
+            panel_id,
+            root: self.panel(panel_id).cwd.clone(),
+            default_hidden,
+        });
+        self.state.dialog = Some(input_dialog(
+            "Find (fd)",
+            "Pattern [--glob] [--hidden] [--follow]",
+            String::new(),
+            DialogTone::Default,
+        ));
+        self.state.status_line = "find: enter pattern and optional fd flags".to_string();
         Ok(true)
     }
 
@@ -1007,6 +1183,7 @@ impl App {
         self.pending_rename = None;
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
+        self.pending_find = None;
         self.pending_mask = Some(PendingMask { panel_id, select });
         let title = if select {
             "Select by mask"
@@ -1214,6 +1391,7 @@ impl App {
         self.pending_mask = None;
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
+        self.pending_find = None;
         let destination_dir = self.inactive_panel_cwd();
         self.pending_rename = Some(PendingRename {
             kind,
@@ -1738,14 +1916,133 @@ impl App {
         );
     }
 
+    fn apply_find_results(
+        &mut self,
+        panel_id: PanelId,
+        root: PathBuf,
+        query: String,
+        glob: bool,
+        hidden: bool,
+        follow_symlinks: bool,
+        mut entries: Vec<FsEntry>,
+    ) -> Result<bool> {
+        let sort_mode = self.panel(panel_id).sort_mode;
+        sort_find_entries(entries.as_mut_slice(), sort_mode);
+        let mut panel_entries = Vec::with_capacity(entries.len().saturating_add(1));
+        panel_entries.push(parent_link_entry(root.clone()));
+        panel_entries.extend(entries);
+        let matches = panel_entries.len().saturating_sub(1);
+
+        {
+            let panel = self.panel_mut(panel_id);
+            panel.cwd = root.clone();
+            panel.find_view = Some(FindPanelState {
+                root: root.clone(),
+                query: query.clone(),
+                glob,
+                hidden,
+                follow_symlinks,
+            });
+            panel.search_query.clear();
+            panel.selected_paths.clear();
+            panel.selected_index = 0;
+            panel.clear_selection_anchor();
+            panel.set_entries(panel_entries);
+            panel.error_message = None;
+        }
+        self.state.active_panel = panel_id;
+        self.state.status_line = format!("find done: '{}' => {matches} match(es)", query);
+        self.push_log(format!(
+            "find done [{}]: '{}' in {}",
+            panel_name(panel_id),
+            query,
+            root.display()
+        ));
+        Ok(true)
+    }
+
+    fn exit_find_view(&mut self, panel_id: PanelId) -> Result<bool> {
+        let Some(find_view) = self.panel(panel_id).find_view.clone() else {
+            return Ok(false);
+        };
+        self.set_active_find_id(panel_id, None);
+        if self
+            .state
+            .find_progress
+            .as_ref()
+            .is_some_and(|progress| progress.panel_id == panel_id)
+        {
+            self.state.find_progress = None;
+        }
+        let panel = self.panel_mut(panel_id);
+        panel.find_view = None;
+        panel.cwd = find_view.root.clone();
+        panel.selected_paths.clear();
+        panel.clear_search();
+        panel.selected_index = 0;
+        panel.clear_selection_anchor();
+        self.reload_panel(panel_id, true)
+    }
+
+    fn open_find_result_entry(&mut self, panel_id: PanelId, entry: FsEntry) -> Result<bool> {
+        if entry.is_virtual {
+            return Ok(false);
+        }
+
+        let target_dir = if entry.entry_type == FsEntryType::Directory {
+            entry.path.clone()
+        } else {
+            entry
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.panel(panel_id).cwd.clone())
+        };
+        let normalized = self
+            .backend(panel_id)
+            .normalize_existing_path("find_jump", target_dir.as_path())?;
+        {
+            let panel = self.panel_mut(panel_id);
+            panel.find_view = None;
+            panel.cwd = normalized;
+            panel.clear_search();
+            panel.selected_paths.clear();
+            panel.selected_index = 0;
+            panel.clear_selection_anchor();
+        }
+        let redraw = self.reload_panel(panel_id, true)?;
+        if entry.entry_type != FsEntryType::Directory {
+            if let Some(position) = self
+                .panel(panel_id)
+                .entries
+                .iter()
+                .position(|candidate| candidate.path == entry.path)
+            {
+                self.panel_mut(panel_id).selected_index = position;
+            }
+        }
+        Ok(redraw)
+    }
+
     fn attach_panel_to_local(&mut self, panel_id: PanelId, cwd: PathBuf) -> Result<bool> {
         let backend_spec = BackendSpec::Local;
         let backend = backend_from_spec(&backend_spec);
         let normalized = backend.normalize_existing_path("connect_local", &cwd)?;
         self.set_panel_backend(panel_id, backend_spec);
         self.set_last_local_cwd(panel_id, normalized.clone());
+        self.set_active_find_id(panel_id, None);
+        if self
+            .state
+            .find_progress
+            .as_ref()
+            .is_some_and(|progress| progress.panel_id == panel_id)
+        {
+            self.state.find_progress = None;
+        }
         let panel = self.panel_mut(panel_id);
         panel.cwd = normalized;
+        panel.find_view = None;
+        panel.search_query.clear();
         panel.selected_index = 0;
         panel.clear_selection_anchor();
         self.reload_panel(panel_id, true)
@@ -1763,8 +2060,19 @@ impl App {
         let backend = backend_from_spec(&backend_spec);
         let normalized = backend.normalize_existing_path("connect_sftp", &conn.root_path)?;
         self.set_panel_backend(panel_id, backend_spec);
+        self.set_active_find_id(panel_id, None);
+        if self
+            .state
+            .find_progress
+            .as_ref()
+            .is_some_and(|progress| progress.panel_id == panel_id)
+        {
+            self.state.find_progress = None;
+        }
         let panel = self.panel_mut(panel_id);
         panel.cwd = normalized;
+        panel.find_view = None;
+        panel.search_query.clear();
         panel.selected_index = 0;
         panel.clear_selection_anchor();
         self.reload_panel(panel_id, true)
@@ -1795,8 +2103,19 @@ impl App {
             archive_path: normalized_archive.clone(),
         });
         self.set_panel_backend(panel_id, backend_spec);
+        self.set_active_find_id(panel_id, None);
+        if self
+            .state
+            .find_progress
+            .as_ref()
+            .is_some_and(|progress| progress.panel_id == panel_id)
+        {
+            self.state.find_progress = None;
+        }
         let panel = self.panel_mut(panel_id);
         panel.cwd = PathBuf::from("/");
+        panel.find_view = None;
+        panel.search_query.clear();
         panel.selected_index = 0;
         panel.clear_selection_anchor();
         let redraw = self.reload_panel(panel_id, true)?;
@@ -1967,6 +2286,17 @@ impl App {
             };
         }
 
+        if self.pending_find.is_some() {
+            return if role == DialogButtonRole::Primary {
+                self.apply_find()
+            } else {
+                self.pending_find = None;
+                self.state.dialog = None;
+                self.push_log("find canceled");
+                true
+            };
+        }
+
         self.state.dialog = None;
         true
     }
@@ -2004,6 +2334,13 @@ impl App {
             self.pending_sftp_connect = None;
             self.state.dialog = None;
             self.push_log("sftp connect canceled");
+            return true;
+        }
+
+        if self.pending_find.is_some() {
+            self.pending_find = None;
+            self.state.dialog = None;
+            self.push_log("find canceled");
             return true;
         }
 
@@ -2225,6 +2562,69 @@ impl App {
         }
     }
 
+    fn apply_find(&mut self) -> bool {
+        let pending = self.pending_find.take();
+        let value = self
+            .state
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.input_value.as_ref())
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        self.state.dialog = None;
+
+        let Some(pending) = pending else {
+            return true;
+        };
+        if value.is_empty() {
+            self.show_alert("find query cannot be empty");
+            return true;
+        }
+
+        let parsed = match parse_find_input(value.as_str(), pending.default_hidden) {
+            Ok(parsed) => parsed,
+            Err(err) => {
+                self.show_alert(format!("find parse error: {err}"));
+                return true;
+            }
+        };
+
+        if !is_fd_available() {
+            self.show_alert("fd is not installed. Install: brew install fd or apt install fd-find");
+            return true;
+        }
+
+        let request = FindRequest {
+            id: self.next_find_id,
+            panel_id: pending.panel_id,
+            root: pending.root.clone(),
+            query: parsed.query.clone(),
+            glob: parsed.glob,
+            hidden: parsed.hidden,
+            follow_symlinks: parsed.follow_symlinks,
+        };
+        self.next_find_id = self.next_find_id.saturating_add(1);
+        self.set_active_find_id(pending.panel_id, Some(request.id));
+        self.state.find_progress = Some(FindProgressState {
+            panel_id: pending.panel_id,
+            query: request.query.clone(),
+            matches: 0,
+            running: true,
+        });
+        self.state.status_line = format!(
+            "find running: '{}'{}{}",
+            request.query,
+            if request.glob { " [glob]" } else { "" },
+            if request.follow_symlinks {
+                " [follow]"
+            } else {
+                ""
+            }
+        );
+        spawn_fd_search(request, self.event_tx.clone());
+        true
+    }
+
     fn proceed_sftp_auth_flow(&mut self, pending: PendingSftpConnect) -> bool {
         let Some(user) = pending.draft.user.clone() else {
             return self.prompt_sftp_login(pending);
@@ -2302,6 +2702,7 @@ impl App {
         if self.pending_rename.is_none()
             && self.pending_mask.is_none()
             && self.pending_sftp_connect.is_none()
+            && self.pending_find.is_none()
         {
             return false;
         }
@@ -2318,6 +2719,7 @@ impl App {
         if self.pending_rename.is_none()
             && self.pending_mask.is_none()
             && self.pending_sftp_connect.is_none()
+            && self.pending_find.is_none()
         {
             return false;
         }
@@ -2558,13 +2960,8 @@ impl App {
                 self.state.status_line = "command line active".to_string();
                 Ok(true)
             }
-            MenuAction::PanelFindFdPlanned(panel_id) => {
-                self.state.active_panel = panel_id;
-                self.show_alert(format!(
-                    "Find via fd is planned for Step 31 ({})",
-                    panel_name(panel_id)
-                ));
-                Ok(true)
+            MenuAction::PanelFindFd(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::start_find_fd_prompt)
             }
             MenuAction::PanelOpenArchiveVfs(panel_id) => {
                 self.state.active_panel = panel_id;
@@ -2756,6 +3153,7 @@ impl App {
 
         let panel = self.active_panel_mut();
         panel.cwd = normalized.clone();
+        panel.find_view = None;
         panel.selected_index = 0;
         panel.clear_selection_anchor();
         self.push_log(format!("cd {}", normalized.display()));
@@ -2909,6 +3307,7 @@ impl App {
         self.pending_mask = None;
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
+        self.pending_find = None;
         self.state.dialog = Some(alert_dialog(message.clone()));
         self.push_log(message);
     }
@@ -3378,6 +3777,59 @@ fn backend_spec_label(spec: &BackendSpec) -> String {
             format!("archive:{name}")
         }
     }
+}
+
+fn parent_link_entry(parent: PathBuf) -> FsEntry {
+    FsEntry {
+        name: "..".to_string(),
+        path: parent,
+        entry_type: FsEntryType::Directory,
+        size_bytes: 0,
+        modified_at: None,
+        is_executable: false,
+        is_hidden: false,
+        is_virtual: true,
+    }
+}
+
+fn sort_find_entries(entries: &mut [FsEntry], sort_mode: SortMode) {
+    entries.sort_by(|left, right| {
+        let type_cmp = find_entry_group(left).cmp(&find_entry_group(right));
+        if type_cmp != std::cmp::Ordering::Equal {
+            return type_cmp;
+        }
+
+        match sort_mode {
+            SortMode::Name => left
+                .name
+                .to_lowercase()
+                .cmp(&right.name.to_lowercase())
+                .then_with(|| left.name.cmp(&right.name)),
+            SortMode::Size => left
+                .size_bytes
+                .cmp(&right.size_bytes)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+                .then_with(|| left.name.cmp(&right.name)),
+            SortMode::ModifiedAt => left
+                .modified_at
+                .cmp(&right.modified_at)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+                .then_with(|| left.name.cmp(&right.name)),
+        }
+    });
+}
+
+fn find_entry_group(entry: &FsEntry) -> u8 {
+    if entry.entry_type == FsEntryType::Directory {
+        return 0;
+    }
+    if entry.entry_type == FsEntryType::Symlink {
+        return 1;
+    }
+    if entry.entry_type == FsEntryType::File {
+        return 2;
+    }
+    3
 }
 
 fn first_selectable_menu_item(items: &[crate::menu::MenuItemSpec]) -> Option<usize> {
