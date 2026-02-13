@@ -124,43 +124,28 @@ fn render_panel(frame: &mut Frame, area: Rect, name: &str, panel: &PanelState, a
 
     let inner = block.inner(area);
     frame.render_widget(block, area);
-    let lines = build_entry_lines(panel, active, inner.height as usize);
+    let lines = build_entry_lines(panel, active, inner);
     let content = Paragraph::new(lines);
     frame.render_widget(content, inner);
 }
 
-fn build_entry_lines(
-    panel: &PanelState,
-    panel_active: bool,
-    capacity: usize,
-) -> Vec<Line<'static>> {
-    if capacity <= 1 {
+fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec<Line<'static>> {
+    let capacity = inner.height as usize;
+    let total_width = inner.width as usize;
+    if capacity <= 1 || total_width == 0 {
         return Vec::new();
     }
 
-    let header = Line::styled(
-        format!(
-            "{:<name_width$} {:>9} {:>16}",
-            "Name",
-            "Size",
-            "Modified",
-            name_width = name_column_width(capacity, panel)
-        ),
-        Style::default()
-            .fg(Color::DarkGray)
-            .add_modifier(Modifier::BOLD),
-    );
-
+    let layout = fixed_table_layout(total_width);
     let rows_capacity = capacity.saturating_sub(1);
     let selected = panel
         .selected_index
         .min(panel.entries.len().saturating_sub(1));
     let start = visible_window_start(selected, panel.entries.len(), rows_capacity);
     let end = (start + rows_capacity).min(panel.entries.len());
-    let name_width = name_column_width(rows_capacity, panel);
 
     let mut lines = Vec::with_capacity(rows_capacity + 1);
-    lines.push(header);
+    lines.push(render_table_header(layout));
 
     for (offset, entry) in panel.entries[start..end].iter().enumerate() {
         let idx = start + offset;
@@ -182,11 +167,7 @@ fn build_entry_lines(
             Style::default()
         };
 
-        let mut name = entry_name(entry);
-        if name.chars().count() > name_width {
-            name = truncate_name(&name, name_width);
-        }
-
+        let name = entry_name(entry);
         let size_text = if entry.is_virtual {
             "-".to_string()
         } else {
@@ -195,14 +176,72 @@ fn build_entry_lines(
         let mtime_text = format_modified_at(entry);
 
         let mut spans = Vec::new();
-        spans.push(Span::styled(
-            format!("{:<name_width$}", name, name_width = name_width),
-            base_style.patch(type_style(entry)),
-        ));
-        spans.push(Span::styled(" ", base_style));
-        spans.push(Span::styled(format!("{:>9}", size_text), base_style));
-        spans.push(Span::styled(" ", base_style));
-        spans.push(Span::styled(format!("{:>16}", mtime_text), base_style));
+        match layout {
+            TableLayout::Full {
+                name_width,
+                size_width,
+                modified_width,
+            } => {
+                spans.push(Span::styled(
+                    format!(
+                        "{:<name_width$}",
+                        truncate_name(&name, name_width),
+                        name_width = name_width
+                    ),
+                    base_style.patch(type_style(entry)),
+                ));
+                spans.push(Span::styled(" ", base_style));
+                spans.push(Span::styled(
+                    format!(
+                        "{:>size_width$}",
+                        truncate_name(&size_text, size_width),
+                        size_width = size_width
+                    ),
+                    base_style,
+                ));
+                spans.push(Span::styled(" ", base_style));
+                spans.push(Span::styled(
+                    format!(
+                        "{:>modified_width$}",
+                        truncate_name(&mtime_text, modified_width),
+                        modified_width = modified_width
+                    ),
+                    base_style,
+                ));
+            }
+            TableLayout::Compact {
+                name_width,
+                size_width,
+            } => {
+                spans.push(Span::styled(
+                    format!(
+                        "{:<name_width$}",
+                        truncate_name(&name, name_width),
+                        name_width = name_width
+                    ),
+                    base_style.patch(type_style(entry)),
+                ));
+                spans.push(Span::styled(" ", base_style));
+                spans.push(Span::styled(
+                    format!(
+                        "{:>size_width$}",
+                        truncate_name(&size_text, size_width),
+                        size_width = size_width
+                    ),
+                    base_style,
+                ));
+            }
+            TableLayout::Minimal { name_width } => {
+                spans.push(Span::styled(
+                    format!(
+                        "{:<name_width$}",
+                        truncate_name(&name, name_width),
+                        name_width = name_width
+                    ),
+                    base_style.patch(type_style(entry)),
+                ));
+            }
+        }
         lines.push(Line::from(spans));
     }
 
@@ -304,15 +343,99 @@ fn type_style(entry: &FsEntry) -> Style {
     }
 }
 
-fn name_column_width(_rows_capacity: usize, panel: &PanelState) -> usize {
-    let max_width = panel
-        .entries
-        .iter()
-        .map(entry_name)
-        .map(|name| name.chars().count())
-        .max()
-        .unwrap_or(4);
-    max_width.clamp(10, 40)
+#[derive(Clone, Copy)]
+enum TableLayout {
+    Full {
+        name_width: usize,
+        size_width: usize,
+        modified_width: usize,
+    },
+    Compact {
+        name_width: usize,
+        size_width: usize,
+    },
+    Minimal {
+        name_width: usize,
+    },
+}
+
+fn fixed_table_layout(total_width: usize) -> TableLayout {
+    if total_width < 14 {
+        return TableLayout::Minimal {
+            name_width: total_width.max(1),
+        };
+    }
+
+    if total_width < 44 {
+        let size_width = 8usize;
+        let name_width = total_width.saturating_sub(size_width + 1).max(4);
+        return TableLayout::Compact {
+            name_width,
+            size_width,
+        };
+    }
+
+    let spaces = 2usize;
+    let available = total_width.saturating_sub(spaces);
+    let mut name_width = available * 64 / 100;
+    let mut size_width = available * 14 / 100;
+    let mut modified_width = available.saturating_sub(name_width + size_width);
+
+    if size_width < 8 {
+        let delta = 8 - size_width;
+        size_width = 8;
+        name_width = name_width.saturating_sub(delta);
+    }
+    if modified_width < 14 {
+        let delta = 14 - modified_width;
+        modified_width = 14;
+        name_width = name_width.saturating_sub(delta);
+    }
+    name_width = name_width.max(8);
+
+    TableLayout::Full {
+        name_width,
+        size_width,
+        modified_width,
+    }
+}
+
+fn render_table_header(layout: TableLayout) -> Line<'static> {
+    let text = match layout {
+        TableLayout::Full {
+            name_width,
+            size_width,
+            modified_width,
+        } => format!(
+            "{:<name_width$} {:>size_width$} {:>modified_width$}",
+            "Name",
+            "Size",
+            "Modified",
+            name_width = name_width,
+            size_width = size_width,
+            modified_width = modified_width
+        ),
+        TableLayout::Compact {
+            name_width,
+            size_width,
+        } => format!(
+            "{:<name_width$} {:>size_width$}",
+            "Name",
+            "Size",
+            name_width = name_width,
+            size_width = size_width
+        ),
+        TableLayout::Minimal { name_width } => {
+            format!("{:<name_width$}", "Name", name_width = name_width)
+        }
+    };
+
+    Line::styled(
+        text,
+        Style::default()
+            .fg(Color::DarkGray)
+            .add_modifier(Modifier::BOLD),
+    )
 }
 
 fn entry_name(entry: &FsEntry) -> String {
