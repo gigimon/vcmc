@@ -856,6 +856,7 @@ dependencies = [
  "chrono",
  "crossbeam-channel",
  "crossterm",
+ "libc",
  "ratatui",
  "ssh2",
  "thiserror",

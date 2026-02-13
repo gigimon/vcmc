@@ -39,7 +39,12 @@ fn main() -> Result<()> {
 
     while app.is_running() {
         let event = event_rx.recv()?;
-        if app.on_event(event) {
+        let mut should_redraw = app.on_event(event);
+        if app.take_force_full_redraw() {
+            terminal.clear()?;
+            should_redraw = true;
+        }
+        if should_redraw {
             terminal.draw(|frame| ui::render(frame, app.state(), app.theme()))?;
         }
     }

@@ -16,7 +16,7 @@ use crate::jobs::WorkerPool;
 use crate::model::{
     AppState, BackendSpec, BatchProgressState, Command, DialogButton, DialogButtonRole,
     DialogState, DialogTone, Event, FsEntry, FsEntryType, Job, JobKind, JobRequest, JobStatus,
-    JobUpdate, PanelId, ScreenMode, SftpAuth, SftpConnectionInfo, TerminalSize,
+    JobUpdate, PanelId, ScreenMode, SftpAuth, SftpConnectionInfo, TerminalSize, ViewerState,
 };
 use crate::theme::{DirColorsTheme, load_theme_from_environment};
 use crate::viewer::load_viewer_state;
@@ -38,6 +38,7 @@ pub struct App {
     pending_mask: Option<PendingMask>,
     pending_sftp_connect: Option<PendingSftpConnect>,
     batch_progress: HashMap<u64, BatchProgress>,
+    force_full_redraw: bool,
     last_left_local_cwd: PathBuf,
     last_right_local_cwd: PathBuf,
     input_mode: Option<InputMode>,
@@ -142,6 +143,7 @@ impl App {
             pending_mask: None,
             pending_sftp_connect: None,
             batch_progress: HashMap::new(),
+            force_full_redraw: false,
             last_left_local_cwd: normalized_cwd.clone(),
             last_right_local_cwd: normalized_cwd,
             input_mode: None,
@@ -162,6 +164,12 @@ impl App {
 
     pub fn is_running(&self) -> bool {
         self.running
+    }
+
+    pub fn take_force_full_redraw(&mut self) -> bool {
+        let redraw = self.force_full_redraw;
+        self.force_full_redraw = false;
+        redraw
     }
 
     pub fn on_event(&mut self, event: Event) -> bool {
@@ -713,6 +721,7 @@ impl App {
         runtime::set_input_poll_paused(false);
 
         resume_result?;
+        self.force_full_redraw = true;
         let status = run_result?;
         if !status.success() {
             self.show_alert(format!("editor exited with status: {status}"));
@@ -1956,6 +1965,10 @@ impl App {
             return self.command_line_cd(command);
         }
 
+        if is_interactive_command(command) {
+            return self.run_tty_shell_command(command);
+        }
+
         self.command_line_run_shell(command)
     }
 
@@ -1986,24 +1999,38 @@ impl App {
         }
 
         let cwd = self.active_panel().cwd.clone();
+        let output = run_shell_command_capture(command, &cwd)?;
+        self.reload_panel(PanelId::Left, false)?;
+        self.reload_panel(PanelId::Right, false)?;
+        self.open_command_output_viewer(command, &output);
+        Ok(true)
+    }
+
+    fn run_tty_shell_command(&mut self, command: &str) -> Result<bool> {
+        if !matches!(self.active_backend_spec(), BackendSpec::Local) {
+            self.show_alert("interactive commands are available only on local panel");
+            return Ok(true);
+        }
+        let cwd = self.active_panel().cwd.clone();
+
         runtime::set_input_poll_paused(true);
         if let Err(err) = terminal::suspend_for_external_process() {
             runtime::set_input_poll_paused(false);
             return Err(err);
         }
 
-        let run_result = run_shell_command_with_pause(command, &cwd);
+        let run_result = run_shell_command_tty(command, &cwd);
         let resume_result = terminal::resume_after_external_process();
         runtime::set_input_poll_paused(false);
         resume_result?;
+        self.force_full_redraw = true;
 
         let status = run_result?;
         if !status.success() {
-            self.push_log(format!("command exited with status: {status}"));
+            self.push_log(format!("interactive command exited with status: {status}"));
         } else {
-            self.push_log(format!("command done: {command}"));
+            self.push_log(format!("interactive command done: {command}"));
         }
-
         self.reload_panel(PanelId::Left, false)?;
         self.reload_panel(PanelId::Right, false)?;
         Ok(true)
@@ -2038,12 +2065,49 @@ impl App {
         let resume_result = terminal::resume_after_external_process();
         runtime::set_input_poll_paused(false);
         resume_result?;
+        self.force_full_redraw = true;
         run_result?;
 
         let _ = self.reload_panel(PanelId::Left, false);
         let _ = self.reload_panel(PanelId::Right, false);
         self.push_log("shell mode closed");
         Ok(true)
+    }
+
+    fn open_command_output_viewer(&mut self, command: &str, output: &std::process::Output) {
+        let mut lines = Vec::new();
+
+        if !output.stdout.is_empty() {
+            let stdout_text = String::from_utf8_lossy(&output.stdout);
+            lines.extend(stdout_text.lines().map(|line| line.to_string()));
+        }
+
+        if !output.stderr.is_empty() {
+            if !lines.is_empty() {
+                lines.push(String::new());
+            }
+            lines.push("[stderr]".to_string());
+            let stderr_text = String::from_utf8_lossy(&output.stderr);
+            lines.extend(stderr_text.lines().map(|line| line.to_string()));
+        }
+
+        if lines.is_empty() {
+            lines.push("(no output)".to_string());
+        }
+        lines.push(String::new());
+        lines.push(format!("[exit status: {}]", output.status));
+
+        let byte_size = (output.stdout.len() + output.stderr.len()) as u64;
+        self.state.viewer = Some(ViewerState {
+            path: PathBuf::from(format!("<cmd:{command}>")),
+            title: format!("Command Output: {command}"),
+            lines,
+            scroll_offset: 0,
+            is_binary_like: false,
+            byte_size,
+        });
+        self.state.screen_mode = ScreenMode::Viewer;
+        self.state.status_line = format!("command output: {command}");
     }
 
     fn update_selection_status(&mut self) {
@@ -2082,6 +2146,9 @@ fn map_key_to_command(key: &KeyEvent) -> Option<Command> {
     match key.code {
         KeyCode::Char('q') => Some(Command::Quit),
         KeyCode::Tab => Some(Command::SwitchPanel),
+        KeyCode::Char('o') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            Some(Command::OpenShell)
+        }
         KeyCode::Up if key.modifiers.contains(KeyModifiers::SHIFT) => Some(Command::SelectRangeUp),
         KeyCode::Down if key.modifiers.contains(KeyModifiers::SHIFT) => {
             Some(Command::SelectRangeDown)
@@ -2154,33 +2221,33 @@ fn map_viewer_key_to_command(key: &KeyEvent) -> Option<Command> {
 
 fn run_external_editor_command(editor: &str, path: &Path) -> Result<std::process::ExitStatus> {
     let command_line = format!("{editor} {}", shell_escape_path(path));
-    ProcessCommand::new("sh")
-        .arg("-lc")
-        .arg(command_line)
-        .status()
-        .map_err(|err| anyhow::anyhow!("failed to launch EDITOR: {err}"))
+    let mut cmd = ProcessCommand::new("sh");
+    cmd.arg("-lc").arg(command_line);
+    run_status_with_sigint_protection(&mut cmd, "failed to launch EDITOR")
 }
 
-fn run_shell_command_with_pause(command: &str, cwd: &Path) -> Result<std::process::ExitStatus> {
+fn run_shell_command_capture(command: &str, cwd: &Path) -> Result<std::process::Output> {
     let shell = shell_program();
-    let wrapped_script = format!(
-        "{command}\nstatus=$?\nprintf '\\n[Press Enter to return to vcmc] '\nread _\nexit $status\n"
-    );
     ProcessCommand::new(shell.as_str())
         .arg("-lc")
-        .arg(wrapped_script)
+        .arg(command)
         .current_dir(cwd)
-        .status()
+        .output()
         .map_err(|err| anyhow::anyhow!("failed to execute shell command: {err}"))
 }
 
 fn run_interactive_shell(cwd: &Path) -> Result<std::process::ExitStatus> {
     let shell = shell_program();
-    ProcessCommand::new(shell.as_str())
-        .arg("-i")
-        .current_dir(cwd)
-        .status()
-        .map_err(|err| anyhow::anyhow!("failed to launch shell: {err}"))
+    let mut cmd = ProcessCommand::new(shell.as_str());
+    cmd.current_dir(cwd);
+    run_status_with_sigint_protection(&mut cmd, "failed to launch shell")
+}
+
+fn run_shell_command_tty(command: &str, cwd: &Path) -> Result<std::process::ExitStatus> {
+    let shell = shell_program();
+    let mut cmd = ProcessCommand::new(shell.as_str());
+    cmd.arg("-lc").arg(command).current_dir(cwd);
+    run_status_with_sigint_protection(&mut cmd, "failed to execute interactive command")
 }
 
 fn shell_program() -> String {
@@ -2189,6 +2256,70 @@ fn shell_program() -> String {
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
         .unwrap_or_else(|| "sh".to_string())
+}
+
+fn run_status_with_sigint_protection(
+    cmd: &mut ProcessCommand,
+    context: &str,
+) -> Result<std::process::ExitStatus> {
+    let mut child = cmd
+        .spawn()
+        .map_err(|err| anyhow::anyhow!("{context}: {err}"))?;
+
+    #[cfg(unix)]
+    let _sigint_guard = SigintIgnoreGuard::new()?;
+
+    child
+        .wait()
+        .map_err(|err| anyhow::anyhow!("{context}: {err}"))
+}
+
+#[cfg(unix)]
+struct SigintIgnoreGuard {
+    previous: libc::sighandler_t,
+}
+
+#[cfg(unix)]
+impl SigintIgnoreGuard {
+    fn new() -> Result<Self> {
+        let previous = unsafe { libc::signal(libc::SIGINT, libc::SIG_IGN) };
+        if previous == libc::SIG_ERR {
+            return Err(anyhow::anyhow!("failed to ignore SIGINT"));
+        }
+        Ok(Self { previous })
+    }
+}
+
+#[cfg(unix)]
+impl Drop for SigintIgnoreGuard {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = libc::signal(libc::SIGINT, self.previous);
+        }
+    }
+}
+
+fn is_interactive_command(command: &str) -> bool {
+    let head = command
+        .split_whitespace()
+        .next()
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    matches!(
+        head.as_str(),
+        "top"
+            | "htop"
+            | "btop"
+            | "vim"
+            | "vi"
+            | "nvim"
+            | "nano"
+            | "less"
+            | "more"
+            | "man"
+            | "watch"
+            | "ssh"
+    )
 }
 
 fn shell_escape_path(path: &Path) -> String {
