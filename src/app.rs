@@ -1862,7 +1862,8 @@ impl App {
         if self.state.top_menu.open {
             if let Some(group_index) = top_menu_group_from_key(key) {
                 self.state.top_menu.group_index = group_index;
-                self.state.top_menu.item_index = 0;
+                self.state.top_menu.item_index =
+                    first_selectable_menu_item(top_menu_groups()[group_index].items).unwrap_or(0);
                 self.state.status_line = format!(
                     "menu: {}",
                     top_menu_groups()[self.state.top_menu.group_index].label
@@ -1898,7 +1899,8 @@ impl App {
             }
             self.state.top_menu.open = true;
             self.state.top_menu.group_index = group_index;
-            self.state.top_menu.item_index = 0;
+            self.state.top_menu.item_index =
+                first_selectable_menu_item(top_menu_groups()[group_index].items).unwrap_or(0);
             self.state.status_line = format!(
                 "menu: {}",
                 top_menu_groups()[self.state.top_menu.group_index].label
@@ -1927,10 +1929,17 @@ impl App {
             .group_index
             .min(top_menu_groups().len().saturating_sub(1));
         let items = top_menu_groups()[self.state.top_menu.group_index].items;
-        if items.is_empty() {
-            self.state.top_menu.item_index = 0;
-        } else {
-            self.state.top_menu.item_index = self.state.top_menu.item_index.min(items.len() - 1);
+        let preferred = self
+            .state
+            .top_menu
+            .item_index
+            .min(items.len().saturating_sub(1));
+        self.state.top_menu.item_index = preferred;
+        if !items
+            .get(preferred)
+            .is_some_and(|item| item.is_selectable())
+        {
+            self.state.top_menu.item_index = first_selectable_menu_item(items).unwrap_or(0);
         }
         self.state.status_line = "menu: arrows navigate, Enter run, Esc close".to_string();
         Ok(true)
@@ -1962,7 +1971,8 @@ impl App {
         } else {
             current - 1
         };
-        self.state.top_menu.item_index = 0;
+        self.state.top_menu.item_index =
+            first_selectable_menu_item(groups[self.state.top_menu.group_index].items).unwrap_or(0);
         self.state.status_line = format!("menu: {}", groups[self.state.top_menu.group_index].label);
         true
     }
@@ -1979,17 +1989,14 @@ impl App {
             self.state.top_menu.item_index = 0;
             return false;
         }
-
         let len = items.len();
         let current = self.state.top_menu.item_index.min(len - 1);
-        self.state.top_menu.item_index = if forward {
-            (current + 1) % len
-        } else if current == 0 {
-            len - 1
+        if let Some(next) = next_selectable_menu_item(items, current, forward) {
+            self.state.top_menu.item_index = next;
+            true
         } else {
-            current - 1
-        };
-        true
+            false
+        }
     }
 
     fn activate_top_menu_item(&mut self) -> bool {
@@ -2005,10 +2012,13 @@ impl App {
         }
         let item_idx = self.state.top_menu.item_index.min(group.items.len() - 1);
         let item = group.items[item_idx];
+        let Some(action) = item.action else {
+            return false;
+        };
 
         self.state.top_menu.open = false;
         self.state.status_line = format!("menu: {} -> {}", group.label, item.label);
-        match self.execute_top_menu_action(item.action) {
+        match self.execute_top_menu_action(action) {
             Ok(redraw) => redraw,
             Err(err) => {
                 self.show_alert(err.to_string());
@@ -2025,35 +2035,54 @@ impl App {
                 Ok(true)
             }
             MenuAction::PanelHome(panel_id) => {
-                self.state.active_panel = panel_id;
-                self.go_to_home()
+                self.run_with_panel_focus(panel_id, Self::go_to_home)
             }
             MenuAction::PanelParent(panel_id) => {
-                self.state.active_panel = panel_id;
-                self.go_to_parent()
+                self.run_with_panel_focus(panel_id, Self::go_to_parent)
             }
-            MenuAction::Copy => self.queue_copy(),
-            MenuAction::Move => self.queue_move(),
-            MenuAction::Delete => self.queue_delete(),
-            MenuAction::Mkdir => self.queue_mkdir(),
-            MenuAction::ConnectSftp => self.handle_sftp_action(),
-            MenuAction::OpenShell => self.open_shell_mode(),
-            MenuAction::OpenCommandLine => {
+            MenuAction::PanelCopy(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::queue_copy)
+            }
+            MenuAction::PanelMove(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::queue_move)
+            }
+            MenuAction::PanelDelete(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::queue_delete)
+            }
+            MenuAction::PanelMkdir(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::queue_mkdir)
+            }
+            MenuAction::PanelConnectSftp(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::handle_sftp_action)
+            }
+            MenuAction::PanelOpenShell(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::open_shell_mode)
+            }
+            MenuAction::PanelOpenCommandLine(panel_id) => {
+                self.state.active_panel = panel_id;
                 self.state.command_line.active = true;
                 self.state.command_line.input.clear();
                 self.state.status_line = "command line active".to_string();
                 Ok(true)
             }
+            MenuAction::PanelFindFdPlanned(panel_id) => {
+                self.state.active_panel = panel_id;
+                self.show_alert(format!(
+                    "Find via fd is planned for Step 31 ({})",
+                    panel_name(panel_id)
+                ));
+                Ok(true)
+            }
+            MenuAction::PanelArchiveVfsPlanned(panel_id) => {
+                self.state.active_panel = panel_id;
+                self.show_alert(format!(
+                    "Archive VFS is planned for Step 30 ({})",
+                    panel_name(panel_id)
+                ));
+                Ok(true)
+            }
             MenuAction::ToggleSort => self.toggle_sort(),
             MenuAction::Refresh => self.refresh_all(),
-            MenuAction::FindFdPlanned => {
-                self.show_alert("Find via fd is planned for Step 31");
-                Ok(true)
-            }
-            MenuAction::ArchiveVfsPlanned => {
-                self.show_alert("Archive VFS is planned for Step 30");
-                Ok(true)
-            }
             MenuAction::ViewerModesPlanned => {
                 self.show_alert("Viewer mode extensions are planned for Step 32");
                 Ok(true)
@@ -2063,6 +2092,15 @@ impl App {
                 Ok(true)
             }
         }
+    }
+
+    fn run_with_panel_focus(
+        &mut self,
+        panel_id: PanelId,
+        action: fn(&mut Self) -> Result<bool>,
+    ) -> Result<bool> {
+        self.state.active_panel = panel_id;
+        action(self)
     }
 
     fn handle_search_input(&mut self, key: &KeyEvent) -> Option<bool> {
@@ -2759,6 +2797,34 @@ fn panel_name(panel_id: PanelId) -> &'static str {
         PanelId::Left => "left",
         PanelId::Right => "right",
     }
+}
+
+fn first_selectable_menu_item(items: &[crate::menu::MenuItemSpec]) -> Option<usize> {
+    items
+        .iter()
+        .position(crate::menu::MenuItemSpec::is_selectable)
+}
+
+fn next_selectable_menu_item(
+    items: &[crate::menu::MenuItemSpec],
+    current: usize,
+    forward: bool,
+) -> Option<usize> {
+    if items.is_empty() {
+        return None;
+    }
+    let len = items.len();
+    for step in 1..=len {
+        let idx = if forward {
+            (current + step) % len
+        } else {
+            (current + len - (step % len)) % len
+        };
+        if items[idx].is_selectable() {
+            return Some(idx);
+        }
+    }
+    None
 }
 
 fn input_dialog(title: &str, body: &str, value: String, tone: DialogTone) -> DialogState {

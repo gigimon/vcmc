@@ -75,13 +75,7 @@ fn render_top_menu(frame: &mut Frame, area: Rect, state: &AppState) {
         return;
     }
 
-    let mut cells = Vec::with_capacity(groups.len() + 1);
-    cells.push(FooterCellSpec {
-        text: "F9 Menu".to_string(),
-        kind: FooterCellKind::Mode,
-        enabled: true,
-        active: state.top_menu.open,
-    });
+    let mut cells = Vec::with_capacity(groups.len());
     for (idx, group) in groups.iter().enumerate() {
         cells.push(FooterCellSpec {
             text: format!("{}({})", group.label, group.hotkey.to_ascii_uppercase()),
@@ -126,9 +120,9 @@ fn render_top_menu_popup(frame: &mut Frame, menu_area: Rect, body_area: Rect, st
         return;
     }
 
-    let menu_cells = groups.len() + 1;
+    let menu_cells = groups.len();
     let cell_widths = distribute_width(menu_area.width as usize, menu_cells);
-    let cell_index = group_idx + 1;
+    let cell_index = group_idx;
     let offset: usize = cell_widths.iter().take(cell_index).sum();
     let mut popup_x = menu_area.x.saturating_add(offset as u16);
     let max_x = body_area
@@ -169,7 +163,11 @@ fn render_top_menu_popup(frame: &mut Frame, menu_area: Rect, body_area: Rect, st
         .item_index
         .min(group.items.len().saturating_sub(1));
     for (idx, item) in group.items.iter().enumerate() {
-        let style = if idx == selected {
+        let style = if !item.is_selectable() {
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        } else if idx == selected {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Yellow)
@@ -650,12 +648,12 @@ fn build_top_menu_spans(cells: &[FooterCellSpec], total_width: usize) -> Vec<Spa
 
     let widths = distribute_width(total_width, cells.len());
     let mut spans = Vec::with_capacity(cells.len());
-    for (idx, (cell, width)) in cells.iter().zip(widths.into_iter()).enumerate() {
+    for (cell, width) in cells.iter().zip(widths.into_iter()) {
         if width == 0 {
             continue;
         }
         let text = fit_footer_cell_text(cell.text.as_str(), width);
-        spans.push(Span::styled(text, top_menu_cell_style(cell, idx == 0)));
+        spans.push(Span::styled(text, top_menu_cell_style(cell)));
     }
     spans
 }
@@ -730,21 +728,7 @@ fn footer_cell_style(cell: &FooterCellSpec) -> Style {
     }
 }
 
-fn top_menu_cell_style(cell: &FooterCellSpec, is_menu_trigger: bool) -> Style {
-    if is_menu_trigger && cell.active {
-        return Style::default()
-            .fg(Color::Black)
-            .bg(Color::Yellow)
-            .add_modifier(Modifier::BOLD);
-    }
-
-    if is_menu_trigger {
-        return Style::default()
-            .fg(Color::Black)
-            .bg(Color::LightCyan)
-            .add_modifier(Modifier::BOLD);
-    }
-
+fn top_menu_cell_style(cell: &FooterCellSpec) -> Style {
     if cell.active {
         Style::default()
             .fg(Color::Black)

@@ -5,17 +5,17 @@ pub enum MenuAction {
     ActivatePanel(PanelId),
     PanelHome(PanelId),
     PanelParent(PanelId),
-    Copy,
-    Move,
-    Delete,
-    Mkdir,
-    ConnectSftp,
-    OpenShell,
-    OpenCommandLine,
+    PanelCopy(PanelId),
+    PanelMove(PanelId),
+    PanelDelete(PanelId),
+    PanelMkdir(PanelId),
+    PanelConnectSftp(PanelId),
+    PanelOpenShell(PanelId),
+    PanelOpenCommandLine(PanelId),
+    PanelFindFdPlanned(PanelId),
+    PanelArchiveVfsPlanned(PanelId),
     ToggleSort,
     Refresh,
-    FindFdPlanned,
-    ArchiveVfsPlanned,
     ViewerModesPlanned,
     EditorSettingsPlanned,
 }
@@ -23,7 +23,27 @@ pub enum MenuAction {
 #[derive(Debug, Clone, Copy)]
 pub struct MenuItemSpec {
     pub label: &'static str,
-    pub action: MenuAction,
+    pub action: Option<MenuAction>,
+}
+
+impl MenuItemSpec {
+    pub const fn action(label: &'static str, action: MenuAction) -> Self {
+        Self {
+            label,
+            action: Some(action),
+        }
+    }
+
+    pub const fn separator(label: &'static str) -> Self {
+        Self {
+            label,
+            action: None,
+        }
+    }
+
+    pub fn is_selectable(&self) -> bool {
+        self.action.is_some()
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -33,112 +53,64 @@ pub struct MenuGroupSpec {
     pub items: &'static [MenuItemSpec],
 }
 
-const LEFT_ITEMS: [MenuItemSpec; 3] = [
-    MenuItemSpec {
-        label: "Activate Left",
-        action: MenuAction::ActivatePanel(PanelId::Left),
-    },
-    MenuItemSpec {
-        label: "Home",
-        action: MenuAction::PanelHome(PanelId::Left),
-    },
-    MenuItemSpec {
-        label: "Parent",
-        action: MenuAction::PanelParent(PanelId::Left),
-    },
-];
-
-const FILES_ITEMS: [MenuItemSpec; 4] = [
-    MenuItemSpec {
-        label: "Copy",
-        action: MenuAction::Copy,
-    },
-    MenuItemSpec {
-        label: "Move",
-        action: MenuAction::Move,
-    },
-    MenuItemSpec {
-        label: "Delete",
-        action: MenuAction::Delete,
-    },
-    MenuItemSpec {
-        label: "Mkdir",
-        action: MenuAction::Mkdir,
-    },
-];
-
-const COMMAND_ITEMS: [MenuItemSpec; 5] = [
-    MenuItemSpec {
-        label: "Connect SFTP",
-        action: MenuAction::ConnectSftp,
-    },
-    MenuItemSpec {
-        label: "Find (fd)",
-        action: MenuAction::FindFdPlanned,
-    },
-    MenuItemSpec {
-        label: "Archive VFS",
-        action: MenuAction::ArchiveVfsPlanned,
-    },
-    MenuItemSpec {
-        label: "Command Line",
-        action: MenuAction::OpenCommandLine,
-    },
-    MenuItemSpec {
-        label: "Shell",
-        action: MenuAction::OpenShell,
-    },
+const LEFT_ITEMS: [MenuItemSpec; 14] = [
+    MenuItemSpec::action("Activate Left", MenuAction::ActivatePanel(PanelId::Left)),
+    MenuItemSpec::action("Home", MenuAction::PanelHome(PanelId::Left)),
+    MenuItemSpec::action("Parent", MenuAction::PanelParent(PanelId::Left)),
+    MenuItemSpec::separator("──── Files ────"),
+    MenuItemSpec::action("Copy", MenuAction::PanelCopy(PanelId::Left)),
+    MenuItemSpec::action("Move", MenuAction::PanelMove(PanelId::Left)),
+    MenuItemSpec::action("Delete", MenuAction::PanelDelete(PanelId::Left)),
+    MenuItemSpec::action("Mkdir", MenuAction::PanelMkdir(PanelId::Left)),
+    MenuItemSpec::separator("─── Command ───"),
+    MenuItemSpec::action("Connect SFTP", MenuAction::PanelConnectSftp(PanelId::Left)),
+    MenuItemSpec::action(
+        "Command Line",
+        MenuAction::PanelOpenCommandLine(PanelId::Left),
+    ),
+    MenuItemSpec::action("Shell", MenuAction::PanelOpenShell(PanelId::Left)),
+    MenuItemSpec::action("Find (fd)", MenuAction::PanelFindFdPlanned(PanelId::Left)),
+    MenuItemSpec::action(
+        "Archive VFS",
+        MenuAction::PanelArchiveVfsPlanned(PanelId::Left),
+    ),
 ];
 
 const OPTIONS_ITEMS: [MenuItemSpec; 4] = [
-    MenuItemSpec {
-        label: "Sort",
-        action: MenuAction::ToggleSort,
-    },
-    MenuItemSpec {
-        label: "Refresh",
-        action: MenuAction::Refresh,
-    },
-    MenuItemSpec {
-        label: "Viewer Modes",
-        action: MenuAction::ViewerModesPlanned,
-    },
-    MenuItemSpec {
-        label: "Editor Settings",
-        action: MenuAction::EditorSettingsPlanned,
-    },
+    MenuItemSpec::action("Sort", MenuAction::ToggleSort),
+    MenuItemSpec::action("Refresh", MenuAction::Refresh),
+    MenuItemSpec::action("Viewer Modes", MenuAction::ViewerModesPlanned),
+    MenuItemSpec::action("Editor Settings", MenuAction::EditorSettingsPlanned),
 ];
 
-const RIGHT_ITEMS: [MenuItemSpec; 3] = [
-    MenuItemSpec {
-        label: "Activate Right",
-        action: MenuAction::ActivatePanel(PanelId::Right),
-    },
-    MenuItemSpec {
-        label: "Home",
-        action: MenuAction::PanelHome(PanelId::Right),
-    },
-    MenuItemSpec {
-        label: "Parent",
-        action: MenuAction::PanelParent(PanelId::Right),
-    },
+const RIGHT_ITEMS: [MenuItemSpec; 14] = [
+    MenuItemSpec::action("Activate Right", MenuAction::ActivatePanel(PanelId::Right)),
+    MenuItemSpec::action("Home", MenuAction::PanelHome(PanelId::Right)),
+    MenuItemSpec::action("Parent", MenuAction::PanelParent(PanelId::Right)),
+    MenuItemSpec::separator("──── Files ────"),
+    MenuItemSpec::action("Copy", MenuAction::PanelCopy(PanelId::Right)),
+    MenuItemSpec::action("Move", MenuAction::PanelMove(PanelId::Right)),
+    MenuItemSpec::action("Delete", MenuAction::PanelDelete(PanelId::Right)),
+    MenuItemSpec::action("Mkdir", MenuAction::PanelMkdir(PanelId::Right)),
+    MenuItemSpec::separator("─── Command ───"),
+    MenuItemSpec::action("Connect SFTP", MenuAction::PanelConnectSftp(PanelId::Right)),
+    MenuItemSpec::action(
+        "Command Line",
+        MenuAction::PanelOpenCommandLine(PanelId::Right),
+    ),
+    MenuItemSpec::action("Shell", MenuAction::PanelOpenShell(PanelId::Right)),
+    MenuItemSpec::action("Find (fd)", MenuAction::PanelFindFdPlanned(PanelId::Right)),
+    MenuItemSpec::action(
+        "Archive VFS",
+        MenuAction::PanelArchiveVfsPlanned(PanelId::Right),
+    ),
 ];
 
-const MENU_GROUPS: [MenuGroupSpec; 5] = [
+const MENU_GROUPS: [MenuGroupSpec; 3] = [
     MenuGroupSpec {
         label: "Left",
         hotkey: 'l',
         items: &LEFT_ITEMS,
-    },
-    MenuGroupSpec {
-        label: "Files",
-        hotkey: 'f',
-        items: &FILES_ITEMS,
-    },
-    MenuGroupSpec {
-        label: "Command",
-        hotkey: 'c',
-        items: &COMMAND_ITEMS,
     },
     MenuGroupSpec {
         label: "Options",
