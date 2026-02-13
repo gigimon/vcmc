@@ -13,6 +13,7 @@ use ssh2::Session;
 
 use crate::backend::{FsBackend, backend_from_spec};
 use crate::jobs::WorkerPool;
+use crate::menu::{MenuAction, menu_group_index_by_hotkey, top_menu_groups};
 use crate::model::{
     AppState, BackendSpec, BatchProgressState, Command, DialogButton, DialogButtonRole,
     DialogState, DialogTone, Event, FsEntry, FsEntryType, Job, JobKind, JobRequest, JobStatus,
@@ -179,6 +180,10 @@ impl App {
                     return redraw;
                 }
 
+                if let Some(redraw) = self.handle_top_menu_input(&key) {
+                    return redraw;
+                }
+
                 if self.state.screen_mode == ScreenMode::Viewer {
                     if let Some(cmd) = map_viewer_key_to_command(&key) {
                         return self.apply_command(cmd);
@@ -215,11 +220,13 @@ impl App {
                 self.running = false;
                 Ok(false)
             }
+            Command::OpenTopMenu => self.open_top_menu(),
             Command::SwitchPanel => {
                 self.state.active_panel = match self.state.active_panel {
                     PanelId::Left => PanelId::Right,
                     PanelId::Right => PanelId::Left,
                 };
+                self.state.top_menu.open = false;
                 self.input_mode = None;
                 self.pending_confirmation = None;
                 self.pending_rename = None;
@@ -266,10 +273,7 @@ impl App {
             Command::OpenEditor => self.open_editor(),
             Command::SelectRangeUp => self.select_range_up(),
             Command::SelectRangeDown => self.select_range_down(),
-            Command::Refresh => self
-                .reload_theme()
-                .and_then(|_| self.reload_panel(PanelId::Left, true))
-                .and_then(|_| self.reload_panel(PanelId::Right, false)),
+            Command::Refresh => self.refresh_all(),
             Command::OpenSelected => self.open_selected_directory(),
             Command::GoToParent => self.go_to_parent(),
             Command::GoHome => self.go_to_home(),
@@ -593,6 +597,12 @@ impl App {
     fn reload_theme(&mut self) -> Result<bool> {
         self.theme = load_theme_from_environment();
         Ok(true)
+    }
+
+    fn refresh_all(&mut self) -> Result<bool> {
+        self.reload_theme()
+            .and_then(|_| self.reload_panel(PanelId::Left, true))
+            .and_then(|_| self.reload_panel(PanelId::Right, false))
     }
 
     fn open_selected_directory(&mut self) -> Result<bool> {
@@ -1844,6 +1854,217 @@ impl App {
         })
     }
 
+    fn handle_top_menu_input(&mut self, key: &KeyEvent) -> Option<bool> {
+        if self.state.dialog.is_some() || self.state.screen_mode == ScreenMode::Viewer {
+            return None;
+        }
+
+        if self.state.top_menu.open {
+            if let Some(group_index) = top_menu_group_from_key(key) {
+                self.state.top_menu.group_index = group_index;
+                self.state.top_menu.item_index = 0;
+                self.state.status_line = format!(
+                    "menu: {}",
+                    top_menu_groups()[self.state.top_menu.group_index].label
+                );
+                return Some(true);
+            }
+
+            return match key.code {
+                KeyCode::Esc | KeyCode::F(9) => Some(self.close_top_menu(true)),
+                KeyCode::Left => Some(self.move_top_menu_group(false)),
+                KeyCode::Right => Some(self.move_top_menu_group(true)),
+                KeyCode::Up => Some(self.move_top_menu_item(false)),
+                KeyCode::Down => Some(self.move_top_menu_item(true)),
+                KeyCode::Enter => Some(self.activate_top_menu_item()),
+                _ => Some(false),
+            };
+        }
+
+        if self.input_mode.is_some() || self.state.command_line.active {
+            return None;
+        }
+
+        if key.code == KeyCode::F(9) && key.modifiers.is_empty() {
+            return Some(self.open_top_menu().unwrap_or_else(|err| {
+                self.show_alert(err.to_string());
+                true
+            }));
+        }
+
+        if let Some(group_index) = top_menu_group_from_key(key) {
+            if top_menu_groups().is_empty() {
+                return Some(false);
+            }
+            self.state.top_menu.open = true;
+            self.state.top_menu.group_index = group_index;
+            self.state.top_menu.item_index = 0;
+            self.state.status_line = format!(
+                "menu: {}",
+                top_menu_groups()[self.state.top_menu.group_index].label
+            );
+            return Some(true);
+        }
+
+        None
+    }
+
+    fn open_top_menu(&mut self) -> Result<bool> {
+        if self.state.dialog.is_some() || self.state.screen_mode == ScreenMode::Viewer {
+            return Ok(false);
+        }
+        if self.input_mode.is_some() || self.state.command_line.active {
+            return Ok(false);
+        }
+        if top_menu_groups().is_empty() {
+            return Ok(false);
+        }
+
+        self.state.top_menu.open = true;
+        self.state.top_menu.group_index = self
+            .state
+            .top_menu
+            .group_index
+            .min(top_menu_groups().len().saturating_sub(1));
+        let items = top_menu_groups()[self.state.top_menu.group_index].items;
+        if items.is_empty() {
+            self.state.top_menu.item_index = 0;
+        } else {
+            self.state.top_menu.item_index = self.state.top_menu.item_index.min(items.len() - 1);
+        }
+        self.state.status_line = "menu: arrows navigate, Enter run, Esc close".to_string();
+        Ok(true)
+    }
+
+    fn close_top_menu(&mut self, update_status: bool) -> bool {
+        if !self.state.top_menu.open {
+            return false;
+        }
+        self.state.top_menu.open = false;
+        if update_status {
+            self.state.status_line = "menu closed".to_string();
+        }
+        true
+    }
+
+    fn move_top_menu_group(&mut self, forward: bool) -> bool {
+        let groups = top_menu_groups();
+        if groups.is_empty() {
+            return false;
+        }
+
+        let len = groups.len();
+        let current = self.state.top_menu.group_index.min(len - 1);
+        self.state.top_menu.group_index = if forward {
+            (current + 1) % len
+        } else if current == 0 {
+            len - 1
+        } else {
+            current - 1
+        };
+        self.state.top_menu.item_index = 0;
+        self.state.status_line = format!("menu: {}", groups[self.state.top_menu.group_index].label);
+        true
+    }
+
+    fn move_top_menu_item(&mut self, forward: bool) -> bool {
+        let groups = top_menu_groups();
+        if groups.is_empty() {
+            return false;
+        }
+
+        let group_idx = self.state.top_menu.group_index.min(groups.len() - 1);
+        let items = groups[group_idx].items;
+        if items.is_empty() {
+            self.state.top_menu.item_index = 0;
+            return false;
+        }
+
+        let len = items.len();
+        let current = self.state.top_menu.item_index.min(len - 1);
+        self.state.top_menu.item_index = if forward {
+            (current + 1) % len
+        } else if current == 0 {
+            len - 1
+        } else {
+            current - 1
+        };
+        true
+    }
+
+    fn activate_top_menu_item(&mut self) -> bool {
+        let groups = top_menu_groups();
+        if groups.is_empty() {
+            return self.close_top_menu(false);
+        }
+
+        let group_idx = self.state.top_menu.group_index.min(groups.len() - 1);
+        let group = groups[group_idx];
+        if group.items.is_empty() {
+            return self.close_top_menu(false);
+        }
+        let item_idx = self.state.top_menu.item_index.min(group.items.len() - 1);
+        let item = group.items[item_idx];
+
+        self.state.top_menu.open = false;
+        self.state.status_line = format!("menu: {} -> {}", group.label, item.label);
+        match self.execute_top_menu_action(item.action) {
+            Ok(redraw) => redraw,
+            Err(err) => {
+                self.show_alert(err.to_string());
+                true
+            }
+        }
+    }
+
+    fn execute_top_menu_action(&mut self, action: MenuAction) -> Result<bool> {
+        match action {
+            MenuAction::ActivatePanel(panel_id) => {
+                self.state.active_panel = panel_id;
+                self.push_log(format!("active panel: {}", panel_name(panel_id)));
+                Ok(true)
+            }
+            MenuAction::PanelHome(panel_id) => {
+                self.state.active_panel = panel_id;
+                self.go_to_home()
+            }
+            MenuAction::PanelParent(panel_id) => {
+                self.state.active_panel = panel_id;
+                self.go_to_parent()
+            }
+            MenuAction::Copy => self.queue_copy(),
+            MenuAction::Move => self.queue_move(),
+            MenuAction::Delete => self.queue_delete(),
+            MenuAction::Mkdir => self.queue_mkdir(),
+            MenuAction::ConnectSftp => self.handle_sftp_action(),
+            MenuAction::OpenShell => self.open_shell_mode(),
+            MenuAction::OpenCommandLine => {
+                self.state.command_line.active = true;
+                self.state.command_line.input.clear();
+                self.state.status_line = "command line active".to_string();
+                Ok(true)
+            }
+            MenuAction::ToggleSort => self.toggle_sort(),
+            MenuAction::Refresh => self.refresh_all(),
+            MenuAction::FindFdPlanned => {
+                self.show_alert("Find via fd is planned for Step 31");
+                Ok(true)
+            }
+            MenuAction::ArchiveVfsPlanned => {
+                self.show_alert("Archive VFS is planned for Step 30");
+                Ok(true)
+            }
+            MenuAction::ViewerModesPlanned => {
+                self.show_alert("Viewer mode extensions are planned for Step 32");
+                Ok(true)
+            }
+            MenuAction::EditorSettingsPlanned => {
+                self.show_alert("Editor chooser/settings are planned for Step 33");
+                Ok(true)
+            }
+        }
+    }
+
     fn handle_search_input(&mut self, key: &KeyEvent) -> Option<bool> {
         let panel_id = match self.input_mode {
             Some(InputMode::Search(panel_id)) => panel_id,
@@ -2133,6 +2354,7 @@ impl App {
 
     fn show_alert(&mut self, message: impl Into<String>) {
         let message = message.into();
+        self.state.top_menu.open = false;
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
@@ -2193,7 +2415,7 @@ fn map_key_to_command(key: &KeyEvent) -> Option<Command> {
         KeyCode::F(6) => Some(Command::Move),
         KeyCode::F(7) => Some(Command::Mkdir),
         KeyCode::F(8) => Some(Command::Delete),
-        KeyCode::F(9) => Some(Command::ConnectSftp),
+        KeyCode::F(9) => Some(Command::OpenTopMenu),
         KeyCode::F(10) => Some(Command::Quit),
         KeyCode::F(2) => Some(Command::ToggleSort),
         KeyCode::Char('r') => Some(Command::Refresh),
@@ -2520,6 +2742,23 @@ fn accelerator_from_key(key: &KeyEvent) -> Option<char> {
         return None;
     };
     Some(c.to_ascii_lowercase())
+}
+
+fn top_menu_group_from_key(key: &KeyEvent) -> Option<usize> {
+    if !key.modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    let KeyCode::Char(c) = key.code else {
+        return None;
+    };
+    menu_group_index_by_hotkey(c)
+}
+
+fn panel_name(panel_id: PanelId) -> &'static str {
+    match panel_id {
+        PanelId::Left => "left",
+        PanelId::Right => "right",
+    }
 }
 
 fn input_dialog(title: &str, body: &str, value: String, tone: DialogTone) -> DialogState {

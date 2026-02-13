@@ -19,7 +19,8 @@ Implemented:
 - fullscreen viewer (`F3`) with smart text/binary-like fallback
 - external editor integration (`F4`) via `$EDITOR` with terminal suspend/resume
 - context-sensitive footer menu (MC-style) for `Normal`, `Selection`, `Dialog`, and `Viewer` modes
-- backend abstraction with SFTP panel mode (`F9` connect dialog)
+- top menu bar (MC-like) with keyboard navigation and action groups
+- backend abstraction with SFTP panel mode (top menu: `Command -> Connect SFTP`)
 
 ## Run
 
@@ -51,8 +52,9 @@ General:
 - `F6`: move (`selection -> batch`, otherwise current item)
 - `F7`: create directory
 - `F8`: delete (`selection -> batch`, otherwise current item)
-- `F9`: connect active panel to SFTP (or switch it back to `local`)
+- `F9`: open top menu (`Left`, `Files`, `Command`, `Options`, `Right`)
 - `F10` or `q`: quit
+- `Alt+L/F/C/O/R`: open top menu directly on specific group
 
 Selection:
 - `Space` / `Ins`: toggle mark on current row
@@ -74,14 +76,14 @@ Viewer controls:
 - `Home/End`: jump to top/bottom
 - `Esc` or `F3` or `q`: close viewer
 
-SFTP connect dialog (`F9`):
+SFTP connect dialog (`Command -> Connect SFTP`):
 - `user@host:port/path auth=agent`
 - `user@host:port/path auth=password password=...`
 - `user@host:port/path auth=key key=/path/to/private_key [passphrase=...]`
 - `local` to switch active panel back to local filesystem
 
 Remote workflow:
-- connect active panel with `F9` and one of the formats above
+- connect active panel via `F9 -> Command -> Connect SFTP` and one of the formats above
 - use `Tab` to switch between local/remote panels
 - `F5/F6/F8` use the same job model for `local<->sftp` and `sftp->sftp`
 

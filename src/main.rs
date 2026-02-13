@@ -3,6 +3,7 @@ mod backend;
 mod errors;
 mod fs;
 mod jobs;
+mod menu;
 mod model;
 mod runtime;
 mod smoke;

@@ -5,6 +5,7 @@ use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 
+use crate::menu::top_menu_groups;
 use crate::model::{
     AppState, BatchProgressState, CommandLineState, DialogButtonRole, DialogState, DialogTone,
     FsEntry, FsEntryType, JobKind, PanelId, PanelState, ScreenMode, SortMode, ViewerState,
@@ -17,19 +18,22 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &DirColorsTheme) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
+            Constraint::Length(1),
             Constraint::Min(1),
             Constraint::Length(1),
             Constraint::Length(1),
         ])
         .split(frame.area());
 
+    render_top_menu(frame, chunks[0], state);
+
     if state.screen_mode == ScreenMode::Viewer {
-        render_viewer(frame, chunks[0], state.viewer.as_ref());
+        render_viewer(frame, chunks[1], state.viewer.as_ref());
     } else {
         let panel_chunks = Layout::default()
             .direction(Direction::Horizontal)
             .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
-            .split(chunks[0]);
+            .split(chunks[1]);
 
         render_panel(
             frame,
@@ -49,8 +53,12 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &DirColorsTheme) {
         );
     }
 
-    render_footer(frame, chunks[1], state);
-    render_command_line(frame, chunks[2], &state.command_line);
+    render_footer(frame, chunks[2], state);
+    render_command_line(frame, chunks[3], &state.command_line);
+
+    if state.top_menu.open {
+        render_top_menu_popup(frame, chunks[0], chunks[1], state);
+    }
 
     if let Some(progress) = state.batch_progress.as_ref() {
         render_batch_progress_overlay(frame, progress);
@@ -59,6 +67,126 @@ pub fn render(frame: &mut Frame, state: &AppState, theme: &DirColorsTheme) {
     if let Some(dialog) = &state.dialog {
         render_dialog(frame, dialog);
     }
+}
+
+fn render_top_menu(frame: &mut Frame, area: Rect, state: &AppState) {
+    let groups = top_menu_groups();
+    if groups.is_empty() {
+        return;
+    }
+
+    let mut cells = Vec::with_capacity(groups.len() + 1);
+    cells.push(FooterCellSpec {
+        text: "F9 Menu".to_string(),
+        kind: FooterCellKind::Mode,
+        enabled: true,
+        active: state.top_menu.open,
+    });
+    for (idx, group) in groups.iter().enumerate() {
+        cells.push(FooterCellSpec {
+            text: format!("{}({})", group.label, group.hotkey.to_ascii_uppercase()),
+            kind: FooterCellKind::Button,
+            enabled: true,
+            active: state.top_menu.open && idx == state.top_menu.group_index,
+        });
+    }
+
+    let spans = build_top_menu_spans(&cells, area.width as usize);
+    frame.render_widget(Paragraph::new(Line::from(spans)), area);
+}
+
+fn render_top_menu_popup(frame: &mut Frame, menu_area: Rect, body_area: Rect, state: &AppState) {
+    let groups = top_menu_groups();
+    if groups.is_empty() || body_area.width < 10 || body_area.height < 4 {
+        return;
+    }
+
+    let group_idx = state
+        .top_menu
+        .group_index
+        .min(groups.len().saturating_sub(1));
+    let group = groups[group_idx];
+    if group.items.is_empty() {
+        return;
+    }
+
+    let mut popup_width = group
+        .items
+        .iter()
+        .map(|item| item.label.chars().count())
+        .max()
+        .unwrap_or(16)
+        .saturating_add(6);
+    popup_width = popup_width.max(20);
+    popup_width = popup_width.min(body_area.width.saturating_sub(2) as usize);
+
+    let popup_height = (group.items.len() as u16).saturating_add(2);
+    let popup_height = popup_height.min(body_area.height);
+    if popup_height < 3 || popup_width < 8 {
+        return;
+    }
+
+    let menu_cells = groups.len() + 1;
+    let cell_widths = distribute_width(menu_area.width as usize, menu_cells);
+    let cell_index = group_idx + 1;
+    let offset: usize = cell_widths.iter().take(cell_index).sum();
+    let mut popup_x = menu_area.x.saturating_add(offset as u16);
+    let max_x = body_area
+        .x
+        .saturating_add(body_area.width.saturating_sub(popup_width as u16));
+    if popup_x > max_x {
+        popup_x = max_x;
+    }
+    if popup_x < body_area.x {
+        popup_x = body_area.x;
+    }
+
+    let popup_area = Rect {
+        x: popup_x,
+        y: body_area.y,
+        width: popup_width as u16,
+        height: popup_height,
+    };
+
+    frame.render_widget(Clear, popup_area);
+    let block = Block::default()
+        .title(format!("{} Menu", group.label))
+        .borders(Borders::ALL)
+        .border_style(
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        );
+    let inner = block.inner(popup_area);
+    frame.render_widget(block, popup_area);
+    if inner.width == 0 || inner.height == 0 {
+        return;
+    }
+
+    let mut lines = Vec::with_capacity(inner.height as usize);
+    let selected = state
+        .top_menu
+        .item_index
+        .min(group.items.len().saturating_sub(1));
+    for (idx, item) in group.items.iter().enumerate() {
+        let style = if idx == selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let text = fit_footer_cell_text(item.label, inner.width as usize);
+        lines.push(Line::styled(text, style));
+        if lines.len() >= inner.height as usize {
+            break;
+        }
+    }
+    while lines.len() < inner.height as usize {
+        lines.push(Line::from(String::new()));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn render_command_line(frame: &mut Frame, area: Rect, command_line: &CommandLineState) {
@@ -382,7 +510,7 @@ fn build_footer_buttons(
                 FooterButtonSpec::new("F6", "Move", current_entry_operable, false),
                 FooterButtonSpec::new("F7", "Mkdir", true, false),
                 FooterButtonSpec::new("F8", "Delete", current_entry_operable, false),
-                FooterButtonSpec::new("F9", "SFTP", true, false),
+                FooterButtonSpec::new("F9", "Menu", true, false),
                 FooterButtonSpec::new("F10", "Quit", true, false),
             ]
         }
@@ -400,7 +528,7 @@ fn build_footer_buttons(
                 FooterButtonSpec::new("F6", "Move", true, true),
                 FooterButtonSpec::new("F7", "Mkdir", true, false),
                 FooterButtonSpec::new("F8", "Delete", true, true),
-                FooterButtonSpec::new("F9", "SFTP", true, false),
+                FooterButtonSpec::new("F9", "Menu", true, false),
                 FooterButtonSpec::new("F10", "Quit", true, false),
             ]
         }
@@ -515,6 +643,23 @@ fn build_footer_spans(cells: &[FooterCellSpec], total_width: usize) -> Vec<Span<
     spans
 }
 
+fn build_top_menu_spans(cells: &[FooterCellSpec], total_width: usize) -> Vec<Span<'static>> {
+    if cells.is_empty() || total_width == 0 {
+        return Vec::new();
+    }
+
+    let widths = distribute_width(total_width, cells.len());
+    let mut spans = Vec::with_capacity(cells.len());
+    for (idx, (cell, width)) in cells.iter().zip(widths.into_iter()).enumerate() {
+        if width == 0 {
+            continue;
+        }
+        let text = fit_footer_cell_text(cell.text.as_str(), width);
+        spans.push(Span::styled(text, top_menu_cell_style(cell, idx == 0)));
+    }
+    spans
+}
+
 fn footer_button_label(key: &str, label: &str) -> String {
     format!("{key} {}", abbreviate_footer_label(label))
 }
@@ -582,6 +727,34 @@ fn footer_cell_style(cell: &FooterCellSpec) -> Style {
                     .add_modifier(Modifier::BOLD)
             }
         }
+    }
+}
+
+fn top_menu_cell_style(cell: &FooterCellSpec, is_menu_trigger: bool) -> Style {
+    if is_menu_trigger && cell.active {
+        return Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD);
+    }
+
+    if is_menu_trigger {
+        return Style::default()
+            .fg(Color::Black)
+            .bg(Color::LightCyan)
+            .add_modifier(Modifier::BOLD);
+    }
+
+    if cell.active {
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default()
+            .fg(Color::White)
+            .bg(Color::Blue)
+            .add_modifier(Modifier::BOLD)
     }
 }
 

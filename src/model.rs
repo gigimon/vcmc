@@ -304,6 +304,7 @@ pub struct ViewerState {
 pub struct AppState {
     pub screen_mode: ScreenMode,
     pub active_panel: PanelId,
+    pub top_menu: TopMenuState,
     pub left_panel: PanelState,
     pub right_panel: PanelState,
     pub status_line: String,
@@ -321,6 +322,7 @@ impl AppState {
         Self {
             screen_mode: ScreenMode::Normal,
             active_panel: PanelId::Left,
+            top_menu: TopMenuState::default(),
             left_panel: PanelState::new(cwd.clone()),
             right_panel: PanelState::new(cwd),
             status_line: "Ready".to_string(),
@@ -336,6 +338,13 @@ impl AppState {
             },
         }
     }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TopMenuState {
+    pub open: bool,
+    pub group_index: usize,
+    pub item_index: usize,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -405,6 +414,7 @@ pub enum DialogTone {
 pub enum Command {
     Quit,
     SwitchPanel,
+    OpenTopMenu,
     ConnectSftp,
     OpenShell,
     MoveSelectionUp,
