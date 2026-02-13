@@ -322,14 +322,14 @@ MVP-функции (итерация 1):
 
 ## Step 34: Полировка итерации 5
 [] Добавить smoke-сценарии: conflict-matrix, archive VFS browse/copy out, `fd` find, viewer search/hex, editor chooser.
-[] Обновить README: верхнее меню, новый find-flow, conflict policies, archive VFS, editor setup.
-[] Добавить Known constraints для `fd`/archive edge-cases и remote viewer limits.
-[] Сформировать backlog итерации 6 (internal editor, sync dir compare, plugin hooks).
+[x] Обновить README: верхнее меню, новый find-flow, conflict policies, archive VFS, editor setup.
+[x] Добавить Known constraints для `fd`/archive edge-cases и remote viewer limits.
+[x] Сформировать backlog итерации 6 (internal editor, sync dir compare, plugin hooks).
 
 # Definition of Done (итерация 5)
-[] Верхнее меню покрывает ключевые действия и не конфликтует с F-key workflow.
-[] Конфликты copy/move решаются интерактивно без принудительного abort.
-[] Архивы открываются как VFS и пригодны для реального browse/copy out workflow.
-[] Find file через `fd` работает стабильно и дает panelized results.
-[] Viewer поддерживает hex + search и работает для local/SFTP.
-[] `F4` работает без `$EDITOR` через first-run выбор и сохраненный редактор.
+[x] Верхнее меню покрывает ключевые действия и не конфликтует с F-key workflow.
+[x] Конфликты copy/move решаются интерактивно без принудительного abort.
+[x] Архивы открываются как VFS и пригодны для реального browse/copy out workflow.
+[x] Find file через `fd` работает стабильно и дает panelized results.
+[x] Viewer поддерживает hex + search и работает для local/SFTP.
+[x] `F4` работает без `$EDITOR` через first-run выбор и сохраненный редактор.

@@ -1,30 +1,32 @@
 # VCMC
 
-VCMC is a fast terminal file manager inspired by Midnight Commander, implemented in Rust with `ratatui` and `crossterm`.
+VCMC is a fast two-panel terminal file manager inspired by Midnight Commander.
+Built in Rust with `ratatui` + `crossterm`, focused on responsive UI and predictable file operations.
 
-## Current Status
+## What Works
 
-Implemented:
-- two-panel layout with active panel focus
-- navigation (`Tab`, `Up/Down`, `Enter`, `Backspace`, `Home`, `~`)
-- command line (`:`) with `cd` and shell command execution
-- interactive shell mode (`Ctrl+O`) with safe TUI suspend/resume
-- file operations (`copy`, `move`, `delete`, `mkdir`) via background jobs
-- MC-like multi-select (`Space/Ins`, range selection, select/deselect by mask, invert)
-- batch `F5/F6/F8` over selected items with preflight checks and summary confirm
-- interactive conflict matrix for `copy/move` (`overwrite/skip/rename/newer` + `apply to all`)
-- incremental search (`/`) per panel
-- per-panel sorting (`F2`)
-- stable table layout (`Name | Size | Modified`) with narrow-width fallback
-- unified dialog kit with buttons, focus, and keyboard navigation
-- fullscreen viewer (`F3`) with smart text/binary-like fallback
-- viewer+ (`F3`) with `text/hex` mode toggle and in-view search (`/`, `n`, `N`)
-- external editor integration (`F4`) with `$EDITOR` or saved chooser fallback
-- context-sensitive footer menu (MC-style) for `Normal`, `Selection`, `Dialog`, and `Viewer` modes
-- top menu bar (MC-like) with keyboard navigation and action groups
-- backend abstraction with SFTP panel mode (top menu: `Left/Right -> Connect SFTP`)
-- archive VFS panel mode for `zip/tar/tar.gz` (browse + copy out)
-- `fd`-powered find with async progress and panelized results view
+- Two-panel navigation with active panel focus (`Tab`)
+- Local + SFTP backends
+- Archive VFS (`zip`, `tar`, `tar.gz`, `tgz`) as read-only panel mode
+- Async copy/move/delete/mkdir jobs (UI stays responsive)
+- MC-like multi-selection (`Space/Ins`, range, mask select/deselect, invert)
+- Interactive conflict matrix for copy/move (`overwrite/skip/rename/newer` + `*All`)
+- Top menu bar (`Left`, `Options`, `Right`) with keyboard navigation
+- Find files via external `fd` with panelized results
+- Fullscreen viewer with `text/hex` modes, in-view search, and match navigation
+- External editor integration (`F4`) with:
+  - `$EDITOR` priority
+  - saved default editor fallback
+  - first-run editor chooser when needed
+- Command line (`:`) and shell mode (`Ctrl+O`)
+
+## Requirements
+
+- macOS or Linux
+- Rust stable toolchain
+- Optional but recommended:
+  - `fd` for Find workflow
+  - available editors in `PATH` (`nvim`, `vim`, `nano`, `hx`, `micro`, `emacs`, `code`)
 
 ## Run
 
@@ -32,135 +34,173 @@ Implemented:
 cargo run
 ```
 
-Smoke/performance check (non-interactive):
+Smoke check:
 
 ```bash
 cargo run -- --smoke
 ```
 
-## Hotkeys
+## Keybindings
 
-General:
+### General
+
 - `Tab`: switch active panel
-- `Up/Down`: move current row
-- `Enter`: open selected directory
+- `Up/Down`: move selection
+- `Enter`: open selected directory / execute special panel item
 - `Backspace`: go to parent directory
 - `Home` or `~`: go to home directory
-- `/`: start incremental search for active panel
-- `:`: open command line (`cd`, shell commands, path jump)
-- `Ctrl+O`: open interactive local shell in current directory
+- `:`: open command line
+- `Ctrl+O`: open interactive shell mode
+- `/`: incremental search in active panel
 - `F2`: cycle sort mode (`name -> size -> mtime`)
-- `F3`: open viewer for current file
-- `F4`: open external editor for current file (`$EDITOR` or saved editor)
-- `F5`: copy (`selection -> batch`, otherwise current item)
-- `F6`: move (`selection -> batch`, otherwise current item)
-- `F7`: create directory
-- `F8`: delete (`selection -> batch`, otherwise current item)
-- `F9`: open top menu (`Left`, `Options`, `Right`)
+- `F3`: open viewer for selected file
+- `F4`: open editor for selected local file
+- `F5`: copy
+- `F6`: move
+- `F7`: mkdir
+- `F8`: delete
+- `F9`: open top menu
 - `F10` or `q`: quit
-- `Alt+L/O/R`: open top menu directly on specific group
-- find dialog: `F9 -> Left/Right -> Find (fd)` then `pattern [--glob] [--hidden] [--follow]`
-- editor chooser: `F9 -> Options -> Editor Settings`
-- on local panel: `Enter` on archive file (`.zip`, `.tar`, `.tar.gz`, `.tgz`) opens archive VFS
-- in archive VFS: `Backspace` at `/` closes archive and returns to local panel path
+- `Alt+L/O/R`: open top menu group directly (`Left` / `Options` / `Right`)
 
-Selection:
-- `Space` / `Ins`: toggle mark on current row
+### Selection
+
+- `Space` / `Ins`: toggle current item selection
 - `Shift+Up/Down`: range select from anchor
 - `+`: select by mask (`*`, `?`)
 - `-`: deselect by mask
 - `*`: invert selection
 
-Dialog controls:
-- `Tab` / `Shift+Tab`: move button focus
-- `Left/Right`: move button focus
-- `Enter`: activate focused button
-- `Esc`: cancel/close dialog
-- `Alt+<letter>`: button accelerator (`Alt+Y`, `Alt+N`, `Alt+A`, `Alt+C`, ...)
-- conflict dialog: `Alt+O` overwrite, `Alt+S` skip, `Alt+R` rename, `Alt+N` newer, `Alt+W/K/A` for `*All`, `Alt+C` cancel
+### Dialogs
 
-Viewer controls:
-- `F2`: toggle mode (`text` / `hex`)
+- `Tab` / `Shift+Tab`: move focused button
+- `Left/Right`: move focused button
+- `Enter`: activate focused button
+- `Esc`: cancel/close
+- `Alt+<letter>`: button accelerator
+
+### Viewer
+
+- `F2`: toggle `text` / `hex`
 - `/`: search in current viewer mode
-- `n` / `N`: next / previous search match
-- `Up/Down`: scroll line-by-line
-- `PgUp/PgDn`: scroll page-by-page
-- `Home/End`: jump to top/bottom
+- `n` / `N`: next / previous match
+- `Up/Down`: line scroll
+- `PgUp/PgDn`: page scroll
+- `Home/End`: jump top/bottom
 - `Esc` or `F3` or `q`: close viewer
 
-SFTP connect dialog (`Left/Right -> Connect SFTP`):
-- `user@host:port/path auth=agent`
-- `user@host:port/path auth=password password=...`
-- `user@host:port/path auth=key key=/path/to/private_key [passphrase=...]`
-- `local` to switch active panel back to local filesystem
+## Top Menu
 
-Remote workflow:
-- connect target panel via `F9 -> Left/Right -> Connect SFTP` and one of the formats above
-- use `Tab` to switch between local/remote panels
-- `F5/F6/F8` use the same job model for `local<->sftp` and `sftp->sftp`
+### Left / Right
 
-Archive workflow:
-- open archive from selected file via `Enter` or `F9 -> Left/Right -> Archive VFS`
-- navigate inside archive with regular panel keys
-- top virtual item `..` exits archive VFS back to local panel
-- copy from archive to local/sftp with `F5` (including batch selection)
+Per-panel actions:
 
-Find workflow (`fd`):
-- start via `F9 -> Left/Right -> Find (fd)` on local panel
-- enter query as `pattern [--glob] [--hidden] [--follow]`
-- search runs async and shows live match counter in footer
-- results are shown in panelized view (`[fd:...]` in panel title)
-- `Enter` on result jumps to source path (`file -> parent dir`, `dir -> open dir`)
-- top virtual item `..` exits find-results view back to normal directory listing
+- Activate panel
+- Home / Parent
+- Copy / Move / Delete / Mkdir
+- Connect SFTP (or disconnect if already connected)
+- Command Line / Shell
+- Find (`fd`)
+- Archive VFS
 
-Editor workflow:
-- if `$EDITOR` is set, `F4` uses it
-- if `$EDITOR` is unset, VCMC auto-detects available editors and asks to choose on first use
-- selected editor is saved in config (`$XDG_CONFIG_HOME/vcmc/config.toml` or `~/.config/vcmc/config.toml`)
-- saved editor can be changed anytime via `F9 -> Options -> Editor Settings`
+### Options
+
+- Sort
+- Refresh
+- Viewer Modes (help info)
+- Editor Settings (choose and save default editor)
+
+## Workflows
+
+### SFTP
+
+- Open `F9 -> Left/Right -> Connect SFTP`
+- Enter address as `host[:port][/path]` or type `local` to switch back
+- Then complete login/auth prompts (password or key path, depending on server auth methods)
+- Use same copy/move/delete model between local and remote panels
+
+### Archive VFS
+
+- On local panel, select archive and press `Enter`, or use `F9 -> Left/Right -> Archive VFS`
+- Archive opens as virtual panel mode (read-only)
+- Top `..` exits archive mode back to local filesystem
+- Supported v1 operations inside archive: browse + copy out (`archive -> local/sftp`)
+
+### Find (`fd`)
+
+- Start from `F9 -> Left/Right -> Find (fd)`
+- Enter: `pattern [--glob] [--hidden] [--follow]`
+- Results appear in panelized virtual view
+- `Enter` on result:
+  - directory: open it
+  - file: jump to parent and select file
+- Top `..` exits find results view
+- If `fd` is missing, VCMC shows install hint
+
+### Viewer
+
+- Works on local, SFTP, and archive backends
+- Uses preview-limited reads (default `256 KB`)
+- Binary-like files default to `hex` mode
+- Search matches are highlighted; active match is emphasized
+
+### Editor (`F4`)
+
+- Local backend only
+- Resolution order:
+  1. `$EDITOR` (if set)
+  2. saved editor from config
+  3. chooser dialog from detected editors
+- Saved setting can be changed via `F9 -> Options -> Editor Settings`
+
+## Configuration
+
+Editor config file:
+
+- `$XDG_CONFIG_HOME/vcmc/config.toml`, or
+- `~/.config/vcmc/config.toml`
+
+Current key:
+
+```toml
+editor = "nvim"
+```
+
+Notes:
+
+- If `$EDITOR` is set, it overrides saved config for current session.
+
+## Command Line Mode (`:`)
+
+Supported patterns:
+
+- `cd`
+- `cd <path>`
+- direct path (`/tmp`, `./dir`, `../dir`, `~`)
+- `sh` / `shell`
+- non-interactive shell command (output opens in viewer)
+- known interactive commands run in TTY mode (e.g. `vim`, `nvim`, `nano`, `less`, `top`, `ssh`)
+
+## Limitations
+
+- POSIX-first (macOS/Linux)
+- Delete is permanent (no Trash)
+- Archive VFS is read-only in v1
+- Find via `fd` is local-only in v1
+- Viewer is preview-limited (`256 KB`) for all backends
+- Editor works only on local backend
+- No internal editor yet
 
 ## Architecture
 
-- UI thread: event loop (`input`, `tick`, `resize`, `worker updates`)
-- worker pool: background execution for long-running filesystem operations
-- filesystem adapter: path normalization, listing, sorting, conflict handling
-- backend abstraction: `LocalFs` + `SftpFs` (`ssh2`)
-- conflict strategy: interactive matrix with per-item or global policy (`overwrite/skip/rename/newer`)
+- Main event loop for input/render/state transitions
+- Worker pool for long operations (copy/move/delete/mkdir)
+- Backend abstraction (`Local`, `Sftp`, `Archive`)
+- Shared dialog framework for confirms/forms/conflicts
+- Footer and top menu are mode-aware and keyboard-driven
 
-Security notes:
-- `auth=password` from the dialog keeps password in process memory; prefer `auth=agent` or key-based auth
-- `auth=key` supports optional `passphrase=...` in connect input
-- connection retries/timeouts are enabled for SFTP connect path
+## Iteration 6 Backlog (draft)
 
-## Scope and Limitations
-
-- POSIX-first (`macOS`, `Linux`) for v1
-- delete is permanent (no Trash integration)
-- command line shell execution is available only on local backend
-- viewer preview reads up to `256 KB` per file in v1
-- SFTP backend uses short connection retries with timeout guards
-- SFTP smoke checks are optional and run only when `VCMC_SFTP_SMOKE_*` env is configured
-- archive VFS is read-only in v1 (no create/delete/move/write inside archive)
-- viewer reads are preview-limited (`256 KB`) on all backends (local/sftp/archive)
-- find via `fd` requires external `fd` binary available in `PATH`
-
-## Known UX Constraints
-
-- binary-like detection uses heuristic (NUL/non-printable ratio) and may misclassify edge cases
-- viewer text rendering truncates very long lines (`512` chars) for stable TUI layout
-- dialog mode uses keyboard-first interaction only (no mouse support)
-- there is no internal editor yet (external `$EDITOR` only)
-- if `$EDITOR` is set, it has priority over saved editor setting
-- editor currently operates on local files only (viewer works for local/sftp/archive preview)
-- SFTP smoke integration requires explicit test host env (not auto-run by default)
-- archive VFS open is currently local-only (no direct open from SFTP file yet)
-- copy into archive VFS is not implemented yet (copy out only)
-- find via `fd` is currently local-only (no remote `sftp` search runner in v1)
-
-## Backlog (next)
-
-- internal editor mode
-- tabs/bookmarks/favorites
-- archive write/update operations
-- optional Trash mode for safer delete behavior
-- configurable keymap
+- Internal editor mode
+- Directory compare/sync workflow
+- Plugin hooks / extension points
