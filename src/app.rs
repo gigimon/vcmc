@@ -649,8 +649,9 @@ impl App {
         };
 
         if entry.is_virtual
-            && entry.name == ":"
+            && entry.name == ".."
             && matches!(self.active_backend_spec(), BackendSpec::Archive(_))
+            && self.active_panel().cwd == Path::new("/")
         {
             return self.detach_archive_panel(self.state.active_panel);
         }

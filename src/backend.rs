@@ -366,14 +366,13 @@ impl FsBackend for ArchiveFsBackend {
         }
 
         sort_entries(entries.as_mut_slice(), sort_mode);
-        if normalized != Path::new("/") {
-            if let Some(parent) = normalized.parent() {
-                entries.insert(0, parent_link(parent.to_path_buf()));
-            } else {
-                entries.insert(0, parent_link(PathBuf::from("/")));
-            }
+        if normalized == Path::new("/") {
+            entries.insert(0, parent_link(PathBuf::from("/")));
+        } else if let Some(parent) = normalized.parent() {
+            entries.insert(0, parent_link(parent.to_path_buf()));
+        } else {
+            entries.insert(0, parent_link(PathBuf::from("/")));
         }
-        entries.insert(0, archive_exit_link());
         Ok(entries)
     }
 
@@ -824,19 +823,6 @@ fn parent_link(parent: PathBuf) -> FsEntry {
     FsEntry {
         name: "..".to_string(),
         path: parent,
-        entry_type: FsEntryType::Directory,
-        size_bytes: 0,
-        modified_at: None,
-        is_executable: false,
-        is_hidden: false,
-        is_virtual: true,
-    }
-}
-
-fn archive_exit_link() -> FsEntry {
-    FsEntry {
-        name: ":".to_string(),
-        path: PathBuf::from("/"),
         entry_type: FsEntryType::Directory,
         size_bytes: 0,
         modified_at: None,
