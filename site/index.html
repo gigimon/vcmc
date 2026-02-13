@@ -1,23 +1,24 @@
 <!doctype html>
-<html lang="ru">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>VCMC — быстрый файловый менеджер</title>
-  <meta name="description" content="VCMC — двухпанельный terminal file manager в стиле Midnight Commander, написанный на Rust." />
+  <title>VCMC - Fast Terminal File Manager</title>
+  <meta name="description" content="VCMC is a fast two-panel terminal file manager in the Midnight Commander spirit, built with Rust." />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=Oswald:wght@400;600&display=swap" rel="stylesheet" />
   <style>
     :root {
       --bg: #0e1316;
-      --bg-soft: #162027;
       --panel: #f3f0e9;
-      --ink: #1b1916;
-      --ink-soft: #4b4844;
-      --accent: #d34d2e;
+      --ink: #1d1a17;
+      --ink-soft: #4c4740;
+      --accent: #cf4d2d;
       --accent-2: #efad2d;
       --line: rgba(255, 255, 255, 0.12);
+      --edge: rgba(255, 255, 255, 0.18);
+      --panel-edge: rgba(0, 0, 0, 0.08);
       --shadow: 0 18px 48px rgba(0, 0, 0, 0.32);
       --radius: 18px;
     }
@@ -32,12 +33,12 @@
       color: var(--panel);
       background:
         radial-gradient(circle at 8% 8%, rgba(239, 173, 45, 0.22), transparent 40%),
-        radial-gradient(circle at 92% 20%, rgba(211, 77, 46, 0.22), transparent 45%),
+        radial-gradient(circle at 92% 20%, rgba(207, 77, 45, 0.22), transparent 45%),
         linear-gradient(180deg, #12191d 0%, #0d1215 100%);
       min-height: 100dvh;
     }
 
-    .grain {
+    .grid-overlay {
       position: fixed;
       inset: 0;
       pointer-events: none;
@@ -50,20 +51,49 @@
     .wrap {
       position: relative;
       z-index: 1;
-      width: min(1060px, 100% - 2rem);
+      width: min(1120px, 100% - 2rem);
       margin: 2rem auto 3rem;
       display: grid;
       gap: 1.1rem;
     }
 
     .hero {
+      position: relative;
       background: linear-gradient(135deg, rgba(243, 240, 233, 0.06), rgba(243, 240, 233, 0.02));
-      border: 1px solid rgba(243, 240, 233, 0.18);
+      border: 1px solid var(--edge);
       border-radius: var(--radius);
-      padding: 1.5rem;
+      padding: 1.6rem;
       box-shadow: var(--shadow);
-      overflow: hidden;
       animation: rise 0.55s ease-out;
+      overflow: hidden;
+    }
+
+    .github-link {
+      position: absolute;
+      top: 1rem;
+      right: 1rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+      color: var(--panel);
+      text-decoration: none;
+      border: 1px solid var(--edge);
+      border-radius: 10px;
+      padding: 0.42rem 0.6rem;
+      background: rgba(0, 0, 0, 0.16);
+      transition: transform 0.15s ease, background 0.2s ease;
+      font-size: 0.78rem;
+    }
+
+    .github-link:hover {
+      transform: translateY(-1px);
+      background: rgba(0, 0, 0, 0.3);
+    }
+
+    .github-link svg {
+      width: 16px;
+      height: 16px;
+      fill: currentColor;
     }
 
     .eyebrow {
@@ -75,19 +105,31 @@
     }
 
     h1 {
-      margin: 0.45rem 0 0.65rem;
+      margin: 0.45rem 0 0.55rem;
       font-family: "Oswald", sans-serif;
-      font-size: clamp(2rem, 6.8vw, 4.7rem);
+      font-size: clamp(2rem, 7vw, 4.9rem);
       line-height: 0.95;
       text-transform: uppercase;
       letter-spacing: 0.02em;
+      max-width: 9ch;
     }
 
     .lead {
       margin: 0;
-      font-size: clamp(0.95rem, 2.5vw, 1.08rem);
-      color: rgba(243, 240, 233, 0.92);
-      max-width: 66ch;
+      font-size: clamp(0.94rem, 2.4vw, 1.08rem);
+      color: rgba(243, 240, 233, 0.93);
+      max-width: 68ch;
+    }
+
+    .codex-note {
+      margin-top: 0.55rem;
+      font-size: 0.8rem;
+      color: rgba(243, 240, 233, 0.82);
+      display: inline-block;
+      padding: 0.25rem 0.52rem;
+      border: 1px solid rgba(243, 240, 233, 0.26);
+      border-radius: 999px;
+      background: rgba(0, 0, 0, 0.16);
     }
 
     .cta {
@@ -117,14 +159,14 @@
 
     .btn:hover {
       transform: translateY(-1px);
-      background: #bd3f23;
+      background: #b43f23;
     }
 
     .btn.alt:hover {
       background: rgba(243, 240, 233, 0.1);
     }
 
-    .grid {
+    .layout {
       display: grid;
       gap: 1.1rem;
       grid-template-columns: repeat(12, minmax(0, 1fr));
@@ -134,19 +176,27 @@
       background: var(--panel);
       color: var(--ink);
       border-radius: var(--radius);
-      border: 1px solid rgba(0, 0, 0, 0.08);
+      border: 1px solid var(--panel-edge);
       padding: 1rem;
       box-shadow: var(--shadow);
       animation: rise 0.6s ease-out;
     }
 
-    .card h2 {
-      margin: 0 0 0.65rem;
+    .card h2,
+    .card h3 {
+      margin: 0 0 0.55rem;
       font-family: "Oswald", sans-serif;
-      font-size: 1.2rem;
-      text-transform: uppercase;
       letter-spacing: 0.02em;
-      color: #322f2b;
+      text-transform: uppercase;
+      color: #302c27;
+    }
+
+    .card h2 {
+      font-size: 1.2rem;
+    }
+
+    .card h3 {
+      font-size: 1rem;
     }
 
     .card p,
@@ -155,26 +205,41 @@
       color: var(--ink-soft);
       font-size: 0.92rem;
       line-height: 1.5;
+      margin: 0;
     }
 
     .card code {
-      color: #22201d;
+      color: #1f1d1b;
       background: rgba(0, 0, 0, 0.05);
       border-radius: 7px;
       padding: 0.1rem 0.34rem;
     }
 
-    .c-main {
-      grid-column: span 7;
+    .span-12 { grid-column: span 12; }
+    .span-8 { grid-column: span 8; }
+    .span-4 { grid-column: span 4; }
+
+    .feature-grid {
+      display: grid;
+      gap: 0.8rem;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
     }
 
-    .c-side {
-      grid-column: span 5;
+    .feature {
+      border: 1px dashed rgba(0, 0, 0, 0.14);
+      border-radius: 12px;
+      padding: 0.65rem;
+      background: #f9f6f0;
     }
 
-    ul {
-      margin: 0;
-      padding-left: 1rem;
+    .feature .tag {
+      display: inline-block;
+      font-size: 0.73rem;
+      border-radius: 999px;
+      padding: 0.16rem 0.48rem;
+      margin-bottom: 0.45rem;
+      background: #efdfc8;
+      color: #5f4624;
     }
 
     .kbd {
@@ -188,6 +253,75 @@
       background: #f9f6ef;
     }
 
+    .key-list {
+      display: grid;
+      gap: 0.42rem;
+    }
+
+    .key-row {
+      display: flex;
+      align-items: center;
+      gap: 0.55rem;
+      border-bottom: 1px dashed rgba(0, 0, 0, 0.12);
+      padding-bottom: 0.3rem;
+    }
+
+    .key-row:last-child {
+      border-bottom: 0;
+      padding-bottom: 0;
+    }
+
+    .key-desc {
+      color: var(--ink-soft);
+      font-size: 0.89rem;
+      line-height: 1.35;
+    }
+
+    .install-steps {
+      display: grid;
+      gap: 0.6rem;
+    }
+
+    .install-step {
+      background: #f9f6f0;
+      border: 1px dashed rgba(0, 0, 0, 0.14);
+      border-radius: 11px;
+      padding: 0.6rem 0.68rem;
+    }
+
+    .install-step p {
+      margin-bottom: 0.35rem;
+      font-size: 0.84rem;
+      color: #5e584f;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .install-step code {
+      display: inline-block;
+      white-space: pre-wrap;
+    }
+
+    .shot-grid {
+      display: grid;
+      gap: 0.75rem;
+      grid-template-columns: 1.8fr 1fr;
+      align-items: start;
+    }
+
+    .shot {
+      background: #171411;
+      border-radius: 12px;
+      overflow: hidden;
+      border: 1px solid rgba(0, 0, 0, 0.22);
+    }
+
+    .shot img {
+      display: block;
+      width: 100%;
+      height: auto;
+    }
+
     .foot {
       text-align: center;
       font-size: 0.78rem;
@@ -195,23 +329,35 @@
       padding: 0.3rem 0;
     }
 
-    .mkdocs {
-      border-left: 4px solid var(--accent);
-      padding-left: 0.72rem;
-    }
-
-    @media (max-width: 880px) {
-      .c-main,
-      .c-side {
+    @media (max-width: 980px) {
+      .span-8,
+      .span-4 {
         grid-column: span 12;
       }
 
+      .feature-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .shot-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 760px) {
       .wrap {
-        width: min(1060px, 100% - 1.1rem);
+        width: min(1120px, 100% - 1rem);
+        margin-top: 1rem;
       }
 
       .hero {
         padding: 1.15rem;
+      }
+
+      .github-link {
+        position: static;
+        margin-bottom: 0.7rem;
+        width: fit-content;
       }
     }
 
@@ -228,53 +374,107 @@
   </style>
 </head>
 <body>
-  <div class="grain" aria-hidden="true"></div>
+  <div class="grid-overlay" aria-hidden="true"></div>
   <main class="wrap">
     <section class="hero">
+      <a class="github-link" href="https://github.com/gigimon/vcmc" target="_blank" rel="noopener noreferrer" aria-label="Open GitHub repository">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8a8 8 0 0 0 5.47 7.59c.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.5-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.01.08-2.1 0 0 .67-.21 2.2.82A7.65 7.65 0 0 1 8 4.84c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.91.08 2.1.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8 8 0 0 0 16 8c0-4.42-3.58-8-8-8Z"></path></svg>
+        GitHub
+      </a>
       <div class="eyebrow">Rust + ratatui + crossterm</div>
       <h1>VCMC</h1>
       <p class="lead">
-        Быстрый двухпанельный файловый менеджер в стиле Midnight Commander.
-        Локальный режим, SFTP, архивы, viewer, editor и поиск прямо из терминала.
+        A fast two-panel terminal file manager in the Midnight Commander spirit.
+        Local files, SFTP, archives, viewer, editor, and search in one keyboard-first workflow.
       </p>
+      <div class="codex-note">Codebase fully built with Codex</div>
       <div class="cta">
-        <button class="btn" data-copy="cargo run">Скопировать: cargo run</button>
-        <button class="btn alt" data-copy="cargo run -- --smoke">Скопировать: smoke</button>
+        <button class="btn" data-copy="cargo run">Copy: cargo run</button>
+        <button class="btn alt" data-copy="cargo run -- --smoke">Copy: smoke check</button>
       </div>
     </section>
 
-    <section class="grid">
-      <article class="card c-main">
-        <h2>Что уже есть</h2>
-        <ul>
-          <li>2 панели, асинхронные операции, responsive UI без фризов.</li>
-          <li>SFTP-подключения и bookmarks (<code>add / edit / delete / connect</code>).</li>
-          <li>Поиск файлов через <code>fd</code> и по содержимому через <code>rg</code>.</li>
-          <li>Viewer (<code>text/hex</code>, поиск) и внешний editor по <code>F4</code>.</li>
-          <li>Archive VFS для <code>zip/tar/tgz</code> (read-only browse + copy out).</li>
-        </ul>
+    <section class="layout">
+      <article class="card span-8">
+        <h2>Feature Set</h2>
+        <div class="feature-grid">
+          <div class="feature">
+            <span class="tag">Navigation</span>
+            <h3>Dual-panel workflow</h3>
+            <p>Work left/right with predictable panel focus and fast directory traversal.</p>
+          </div>
+          <div class="feature">
+            <span class="tag">Operations</span>
+            <h3>Async jobs and progress</h3>
+            <p>Copy/move/delete run via worker jobs so UI remains responsive during long tasks.</p>
+          </div>
+          <div class="feature">
+            <span class="tag">Remote</span>
+            <h3>SFTP + bookmarks</h3>
+            <p>Save hosts and reconnect quickly with <code>@bookmark_name</code> in connect flow.</p>
+          </div>
+          <div class="feature">
+            <span class="tag">Discovery</span>
+            <h3>File and content search</h3>
+            <p>Use <code>fd</code> for file lookup and <code>rg</code> for content hits with panelized results.</p>
+          </div>
+          <div class="feature">
+            <span class="tag">Inspect</span>
+            <h3>Viewer and external editor</h3>
+            <p>Open files in text/hex viewer and jump to external editor with <code>F4</code>.</p>
+          </div>
+          <div class="feature">
+            <span class="tag">Virtual FS</span>
+            <h3>Archive browsing</h3>
+            <p>Browse <code>zip</code>, <code>tar</code>, <code>tgz</code> as read-only virtual panels and copy files out.</p>
+          </div>
+        </div>
       </article>
 
-      <article class="card c-side">
-        <h2>Быстрые клавиши</h2>
-        <p><span class="kbd">Tab</span> панели · <span class="kbd">F5/F6/F8</span> copy/move/delete · <span class="kbd">F9</span> меню · <span class="kbd">F10</span> выход</p>
-        <p><span class="kbd">F3</span> viewer · <span class="kbd">F4</span> editor · <span class="kbd">/</span> поиск · <span class="kbd">Ctrl+O</span> shell</p>
+      <article class="card span-4">
+        <h2>Fast Keys</h2>
+        <div class="key-list">
+          <div class="key-row"><span class="kbd">Tab</span><span class="key-desc">Switch active panel</span></div>
+          <div class="key-row"><span class="kbd">F5</span><span class="key-desc">Copy selected file(s)</span></div>
+          <div class="key-row"><span class="kbd">F6</span><span class="key-desc">Move selected file(s)</span></div>
+          <div class="key-row"><span class="kbd">F8</span><span class="key-desc">Delete selected file(s)</span></div>
+          <div class="key-row"><span class="kbd">F9</span><span class="key-desc">Open top menu</span></div>
+          <div class="key-row"><span class="kbd">F3</span><span class="key-desc">Open viewer</span></div>
+          <div class="key-row"><span class="kbd">F4</span><span class="key-desc">Open external editor</span></div>
+          <div class="key-row"><span class="kbd">/</span><span class="key-desc">Inline quick search</span></div>
+          <div class="key-row"><span class="kbd">Ctrl+O</span><span class="key-desc">Open shell mode</span></div>
+          <div class="key-row"><span class="kbd">F10</span><span class="key-desc">Quit VCMC</span></div>
+        </div>
       </article>
 
-      <article class="card c-side">
-        <h2>Почему так</h2>
-        <p>Для 1-страничника самый простой и быстрый путь: один <code>index.html</code> без сборки и зависимостей.</p>
-        <p class="mkdocs"><strong>Когда нужен MkDocs:</strong> если хочешь много страниц документации, навигацию, поиск и автопубликацию docs.</p>
+      <article class="card span-12">
+        <h2>Installation</h2>
+        <div class="install-steps">
+          <div class="install-step">
+            <p>Clone repository</p>
+            <code>git clone https://github.com/gigimon/vcmc.git</code>
+          </div>
+          <div class="install-step">
+            <p>Build binary</p>
+            <code>cd vcmc && cargo build</code>
+          </div>
+          <div class="install-step">
+            <p>Run application</p>
+            <code>cargo run</code>
+          </div>
+        </div>
       </article>
 
-      <article class="card c-main">
-        <h2>Что можно добавить дальше</h2>
-        <ul>
-          <li>GIF/видео демо реального workflow в терминале.</li>
-          <li>Сравнение с классическим MC (таблица feature-by-feature).</li>
-          <li>Секцию "Use cases": локальная чистка, remote deploy, triage логов.</li>
-          <li>Кнопку "Open Issues" и roadmap ближайшего релиза.</li>
-        </ul>
+      <article class="card span-12">
+        <h2>VCMC In Action</h2>
+        <div class="shot-grid">
+          <figure class="shot">
+            <img src="./assets/vcmc-main.png" alt="VCMC main two-panel interface" loading="lazy" />
+          </figure>
+          <figure class="shot">
+            <img src="./assets/vcmc-search.png" alt="VCMC interface with active quick search/filter state" loading="lazy" />
+          </figure>
+        </div>
       </article>
     </section>
 
@@ -289,7 +489,7 @@
         try {
           await navigator.clipboard.writeText(value);
           const original = button.textContent;
-          button.textContent = 'Скопировано';
+          button.textContent = 'Copied';
           setTimeout(() => {
             button.textContent = original;
           }, 900);
@@ -298,8 +498,11 @@
         }
       });
     });
+
     const year = document.getElementById('year');
-    if (year) year.textContent = new Date().getFullYear();
+    if (year) {
+      year.textContent = new Date().getFullYear();
+    }
   </script>
 </body>
 </html>
