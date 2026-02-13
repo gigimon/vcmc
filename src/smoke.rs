@@ -84,6 +84,7 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
 
     let request = JobRequest {
         id: 1,
+        batch_id: None,
         kind: JobKind::Copy,
         source: workload.copy_source.clone(),
         destination: Some(workload.copy_destination_dir.clone()),

@@ -1,3 +1,4 @@
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Result;
@@ -17,18 +18,21 @@ pub struct App {
     fs: FsAdapter,
     workers: WorkerPool,
     next_job_id: u64,
+    next_batch_id: u64,
     pending_confirmation: Option<PendingConfirmation>,
     pending_rename: Option<PendingRename>,
     pending_mask: Option<PendingMask>,
+    batch_progress: HashMap<u64, BatchProgress>,
     input_mode: Option<InputMode>,
 }
 
 enum PendingConfirmation {
-    Delete {
+    DeleteOne {
         path: PathBuf,
         name: String,
         is_directory: bool,
     },
+    Batch(BatchPlan),
 }
 
 struct PendingRename {
@@ -41,6 +45,27 @@ struct PendingRename {
 struct PendingMask {
     panel_id: PanelId,
     select: bool,
+}
+
+#[derive(Clone)]
+struct BatchOpItem {
+    source: PathBuf,
+    destination: Option<PathBuf>,
+    name: String,
+}
+
+struct BatchPlan {
+    batch_id: u64,
+    kind: JobKind,
+    items: Vec<BatchOpItem>,
+    summary: String,
+}
+
+struct BatchProgress {
+    kind: JobKind,
+    total: usize,
+    completed: usize,
+    failed: usize,
 }
 
 enum InputMode {
@@ -58,9 +83,11 @@ impl App {
             fs,
             workers,
             next_job_id: 1,
+            next_batch_id: 1,
             pending_confirmation: None,
             pending_rename: None,
             pending_mask: None,
+            batch_progress: HashMap::new(),
             input_mode: None,
         };
 
@@ -173,6 +200,10 @@ impl App {
     }
 
     fn handle_job_update(&mut self, update: JobUpdate) -> bool {
+        if let Some(batch_id) = update.batch_id {
+            return self.handle_batch_job_update(batch_id, update);
+        }
+
         let needs_reload = update.status == JobStatus::Done;
         let has_failed = update.status == JobStatus::Failed;
         let next_status_line = match update.status {
@@ -187,15 +218,7 @@ impl App {
             JobStatus::Queued | JobStatus::Running => "job updated".to_string(),
         };
 
-        if let Some(job) = self.state.jobs.iter_mut().find(|job| job.id == update.id) {
-            job.status = update.status;
-            job.message = update.message.clone();
-            if update.destination.is_some() {
-                job.destination = update.destination.clone();
-            }
-        } else {
-            self.state.jobs.push(update.into_job());
-        }
+        self.upsert_job(update);
 
         if has_failed {
             self.show_alert(next_status_line);
@@ -213,6 +236,80 @@ impl App {
         }
 
         true
+    }
+
+    fn handle_batch_job_update(&mut self, batch_id: u64, update: JobUpdate) -> bool {
+        let has_failed = update.status == JobStatus::Failed;
+        let is_terminal = matches!(update.status, JobStatus::Done | JobStatus::Failed);
+        let message = update
+            .message
+            .clone()
+            .unwrap_or_else(|| "batch job updated".to_string());
+        self.upsert_job(update);
+
+        let mut should_log_failure = false;
+        let mut finished: Option<(JobKind, usize, usize)> = None;
+
+        if let Some(progress) = self.batch_progress.get_mut(&batch_id) {
+            if is_terminal {
+                progress.completed = progress.completed.saturating_add(1);
+                if has_failed {
+                    progress.failed = progress.failed.saturating_add(1);
+                }
+            }
+
+            if has_failed {
+                should_log_failure = true;
+            }
+
+            if progress.completed >= progress.total {
+                finished = Some((progress.kind, progress.total, progress.failed));
+            }
+        }
+
+        if should_log_failure {
+            self.push_log(message);
+        }
+
+        if let Some((kind, total, failed)) = finished {
+            self.batch_progress.remove(&batch_id);
+            if failed > 0 {
+                self.show_alert(format!(
+                    "batch {} finished: total {} / failed {}",
+                    operation_name(kind),
+                    total,
+                    failed
+                ));
+            } else {
+                self.push_log(format!(
+                    "batch {} finished: {} item(s)",
+                    operation_name(kind),
+                    total
+                ));
+            }
+
+            if let Err(err) = self.reload_panel(PanelId::Left, false) {
+                self.show_alert(format!("refresh left failed: {err}"));
+            }
+            if let Err(err) = self.reload_panel(PanelId::Right, false) {
+                self.show_alert(format!("refresh right failed: {err}"));
+            }
+        }
+
+        true
+    }
+
+    fn upsert_job(&mut self, update: JobUpdate) {
+        if let Some(job) = self.state.jobs.iter_mut().find(|job| job.id == update.id) {
+            job.status = update.status;
+            job.message = update.message.clone();
+            job.batch_id = update.batch_id;
+            if update.destination.is_some() {
+                job.destination = update.destination.clone();
+            }
+        } else {
+            self.state.jobs.push(update.into_job());
+        }
     }
 
     fn active_panel_mut(&mut self) -> &mut crate::model::PanelState {
@@ -376,21 +473,39 @@ impl App {
     }
 
     fn queue_copy(&mut self) -> Result<bool> {
+        if let Some(plan) = self.build_batch_plan_from_selection(JobKind::Copy)? {
+            self.state.confirm_prompt = Some(plan.summary.clone());
+            self.pending_confirmation = Some(PendingConfirmation::Batch(plan));
+            return Ok(true);
+        }
+
         let entry = self.selected_action_target_entry()?;
         self.open_rename_prompt(JobKind::Copy, &entry)
     }
 
     fn queue_move(&mut self) -> Result<bool> {
+        if let Some(plan) = self.build_batch_plan_from_selection(JobKind::Move)? {
+            self.state.confirm_prompt = Some(plan.summary.clone());
+            self.pending_confirmation = Some(PendingConfirmation::Batch(plan));
+            return Ok(true);
+        }
+
         let entry = self.selected_action_target_entry()?;
         self.open_rename_prompt(JobKind::Move, &entry)
     }
 
     fn queue_delete(&mut self) -> Result<bool> {
+        if let Some(plan) = self.build_batch_plan_from_selection(JobKind::Delete)? {
+            self.state.confirm_prompt = Some(plan.summary.clone());
+            self.pending_confirmation = Some(PendingConfirmation::Batch(plan));
+            return Ok(true);
+        }
+
         let entry = self.selected_action_target_entry()?;
         let path = self.fs.normalize_existing_path("delete", &entry.path)?;
         self.guard_delete_target(&path)?;
 
-        self.pending_confirmation = Some(PendingConfirmation::Delete {
+        self.pending_confirmation = Some(PendingConfirmation::DeleteOne {
             path,
             name: entry.name.clone(),
             is_directory: entry.entry_type == FsEntryType::Directory,
@@ -404,6 +519,102 @@ impl App {
             format!("Delete '{}' permanently? [y/N]", entry.name)
         });
         Ok(true)
+    }
+
+    fn build_batch_plan_from_selection(&mut self, kind: JobKind) -> Result<Option<BatchPlan>> {
+        let selected_entries = self.active_panel_selected_entries();
+        if selected_entries.is_empty() {
+            return Ok(None);
+        }
+
+        let destination_dir = self.inactive_panel_cwd();
+        let mut unique_sources = HashSet::new();
+        let mut unique_destinations = HashSet::new();
+        let mut items = Vec::with_capacity(selected_entries.len());
+        let mut total_bytes = 0u64;
+        let mut dir_count = 0usize;
+
+        for entry in selected_entries {
+            if entry.is_virtual {
+                return Err(anyhow::anyhow!(
+                    "virtual entries cannot be used in batch operations"
+                ));
+            }
+
+            let source = self.fs.normalize_existing_path("batch", &entry.path)?;
+            if !unique_sources.insert(source.clone()) {
+                return Err(anyhow::anyhow!(
+                    "duplicate source in batch: {}",
+                    source.display()
+                ));
+            }
+
+            let destination = match kind {
+                JobKind::Copy | JobKind::Move => {
+                    let target = destination_dir.join(&entry.name);
+                    if source == target {
+                        return Err(anyhow::anyhow!(
+                            "batch {} target equals source for {}",
+                            operation_name(kind),
+                            source.display()
+                        ));
+                    }
+                    if !unique_destinations.insert(target.clone()) {
+                        return Err(anyhow::anyhow!(
+                            "duplicate destination in batch: {}",
+                            target.display()
+                        ));
+                    }
+                    if target.try_exists()? {
+                        return Err(anyhow::anyhow!(
+                            "destination already exists: {}",
+                            target.display()
+                        ));
+                    }
+                    Some(target)
+                }
+                JobKind::Delete | JobKind::Mkdir => None,
+            };
+
+            if kind == JobKind::Delete {
+                self.guard_delete_target(&source)?;
+            }
+
+            total_bytes = total_bytes.saturating_add(entry.size_bytes);
+            if entry.entry_type == FsEntryType::Directory {
+                dir_count += 1;
+            }
+            items.push(BatchOpItem {
+                source,
+                destination,
+                name: entry.name,
+            });
+        }
+
+        let batch_id = self.next_batch_id;
+        self.next_batch_id += 1;
+        let summary = batch_summary(kind, items.len(), total_bytes, dir_count, &destination_dir);
+
+        Ok(Some(BatchPlan {
+            batch_id,
+            kind,
+            items,
+            summary,
+        }))
+    }
+
+    fn active_panel_selected_entries(&self) -> Vec<FsEntry> {
+        let panel = self.active_panel();
+        if panel.selected_paths.is_empty() {
+            return Vec::new();
+        }
+
+        panel
+            .all_entries
+            .iter()
+            .filter(|entry| panel.selected_paths.contains(&entry.path))
+            .cloned()
+            .collect()
     }
 
     fn queue_mkdir(&mut self) -> Result<bool> {
@@ -443,9 +654,22 @@ impl App {
         destination: Option<PathBuf>,
         queued_message: impl Into<String>,
     ) -> Result<bool> {
+        self.enqueue_job_with_options(kind, source, destination, None, queued_message, true)
+    }
+
+    fn enqueue_job_with_options(
+        &mut self,
+        kind: JobKind,
+        source: PathBuf,
+        destination: Option<PathBuf>,
+        batch_id: Option<u64>,
+        queued_message: impl Into<String>,
+        log_message: bool,
+    ) -> Result<bool> {
         let queued_message = queued_message.into();
         let request = JobRequest {
             id: self.next_job_id,
+            batch_id,
             kind,
             source: source.clone(),
             destination: destination.clone(),
@@ -454,14 +678,54 @@ impl App {
 
         self.state.jobs.push(Job {
             id: request.id,
+            batch_id,
             kind: request.kind,
             status: JobStatus::Queued,
             source,
             destination,
             message: Some(queued_message.to_string()),
         });
-        self.push_log(queued_message);
+        if log_message {
+            self.push_log(queued_message);
+        }
         self.workers.submit(request)?;
+        Ok(true)
+    }
+
+    fn execute_batch_plan(&mut self, plan: BatchPlan) -> Result<bool> {
+        let total = plan.items.len();
+        let kind = plan.kind;
+        let batch_id = plan.batch_id;
+        if total == 0 {
+            return Ok(false);
+        }
+
+        self.batch_progress.insert(
+            batch_id,
+            BatchProgress {
+                kind,
+                total,
+                completed: 0,
+                failed: 0,
+            },
+        );
+
+        for item in plan.items {
+            self.enqueue_job_with_options(
+                kind,
+                item.source,
+                item.destination,
+                Some(batch_id),
+                format!("{} queued: {}", operation_name(kind), item.name),
+                false,
+            )?;
+        }
+
+        self.push_log(format!(
+            "batch {} queued: {} item(s)",
+            operation_name(kind),
+            total
+        ));
         Ok(true)
     }
 
@@ -527,18 +791,23 @@ impl App {
             KeyCode::Char('y') | KeyCode::Char('Y') => {
                 let confirmation = self.pending_confirmation.take();
                 self.state.confirm_prompt = None;
-                if let Some(PendingConfirmation::Delete {
-                    path,
-                    name,
-                    is_directory,
-                }) = confirmation
-                {
-                    let description = if is_directory {
-                        format!("delete queued (recursive): {name}")
-                    } else {
-                        format!("delete queued: {name}")
+                if let Some(confirmation) = confirmation {
+                    let result = match confirmation {
+                        PendingConfirmation::DeleteOne {
+                            path,
+                            name,
+                            is_directory,
+                        } => {
+                            let description = if is_directory {
+                                format!("delete queued (recursive): {name}")
+                            } else {
+                                format!("delete queued: {name}")
+                            };
+                            self.enqueue_job(JobKind::Delete, path, None, description)
+                        }
+                        PendingConfirmation::Batch(plan) => self.execute_batch_plan(plan),
                     };
-                    let result = self.enqueue_job(JobKind::Delete, path, None, description);
+
                     return Some(match result {
                         Ok(redraw) => redraw,
                         Err(err) => {
@@ -552,7 +821,7 @@ impl App {
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc | KeyCode::Enter => {
                 self.pending_confirmation = None;
                 self.state.confirm_prompt = None;
-                self.push_log("delete canceled");
+                self.push_log("operation canceled");
                 Some(true)
             }
             _ => Some(false),
@@ -811,6 +1080,55 @@ fn map_key_to_command(key: &KeyEvent) -> Option<Command> {
         KeyCode::Char('~') => Some(Command::GoHome),
         KeyCode::Home => Some(Command::GoHome),
         _ => None,
+    }
+}
+
+fn operation_name(kind: JobKind) -> &'static str {
+    match kind {
+        JobKind::Copy => "copy",
+        JobKind::Move => "move",
+        JobKind::Delete => "delete",
+        JobKind::Mkdir => "mkdir",
+    }
+}
+
+fn batch_summary(
+    kind: JobKind,
+    count: usize,
+    total_bytes: u64,
+    dir_count: usize,
+    destination_dir: &Path,
+) -> String {
+    match kind {
+        JobKind::Copy => format!(
+            "Copy {} item(s), {} to {}? [y/N]",
+            count,
+            format_bytes(total_bytes),
+            destination_dir.display()
+        ),
+        JobKind::Move => format!(
+            "Move {} item(s), {} to {}? [y/N]",
+            count,
+            format_bytes(total_bytes),
+            destination_dir.display()
+        ),
+        JobKind::Delete => {
+            if dir_count > 0 {
+                format!(
+                    "Delete {} item(s), {} (includes {} dir) permanently? [y/N]",
+                    count,
+                    format_bytes(total_bytes),
+                    dir_count
+                )
+            } else {
+                format!(
+                    "Delete {} item(s), {} permanently? [y/N]",
+                    count,
+                    format_bytes(total_bytes)
+                )
+            }
+        }
+        JobKind::Mkdir => format!("Run mkdir batch for {} item(s)? [y/N]", count),
     }
 }
 

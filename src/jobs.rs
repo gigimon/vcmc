@@ -57,6 +57,7 @@ fn worker_loop(request_rx: Receiver<JobRequest>, event_tx: Sender<Event>) {
         if event_tx
             .send(Event::Job(JobUpdate {
                 id: request.id,
+                batch_id: request.batch_id,
                 kind: request.kind,
                 status: JobStatus::Running,
                 source: request.source.clone(),
@@ -85,6 +86,7 @@ fn worker_loop(request_rx: Receiver<JobRequest>, event_tx: Sender<Event>) {
         if event_tx
             .send(Event::Job(JobUpdate {
                 id: request.id,
+                batch_id: request.batch_id,
                 kind: request.kind,
                 status,
                 source: request.source.clone(),

@@ -351,6 +351,7 @@ pub enum JobStatus {
 #[derive(Debug, Clone)]
 pub struct Job {
     pub id: u64,
+    pub batch_id: Option<u64>,
     pub kind: JobKind,
     pub status: JobStatus,
     pub source: PathBuf,
@@ -361,6 +362,7 @@ pub struct Job {
 #[derive(Debug, Clone)]
 pub struct JobRequest {
     pub id: u64,
+    pub batch_id: Option<u64>,
     pub kind: JobKind,
     pub source: PathBuf,
     pub destination: Option<PathBuf>,
@@ -369,6 +371,7 @@ pub struct JobRequest {
 #[derive(Debug, Clone)]
 pub struct JobUpdate {
     pub id: u64,
+    pub batch_id: Option<u64>,
     pub kind: JobKind,
     pub status: JobStatus,
     pub source: PathBuf,
@@ -380,6 +383,7 @@ impl JobUpdate {
     pub fn into_job(self) -> Job {
         Job {
             id: self.id,
+            batch_id: self.batch_id,
             kind: self.kind,
             status: self.status,
             source: self.source,
