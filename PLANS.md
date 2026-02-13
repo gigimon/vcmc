@@ -132,12 +132,12 @@ MVP-функции (итерация 1):
 [x] Поддержать ускорители кнопок (`Alt+буква`) для частых действий.
 
 ## Step 15: Нижнее меню F-key в стиле MC
-[] Реализовать визуальные кнопки `F1..F10` в footer (`[F5 Copy] [F6 Move] ...`).
-[] Сделать context-sensitive наборы:
-[] `Normal`: базовые действия.
-[] `Selection`: batch-операции.
-[] `Dialog`: кнопки активного диалога (`OK/Cancel/Apply`).
-[] Подсветка disabled/active состояний для прозрачного UX.
+[x] Реализовать визуальные кнопки `F1..F10` в footer (`[F5 Copy] [F6 Move] ...`).
+[x] Сделать context-sensitive наборы:
+[x] `Normal`: базовые действия.
+[x] `Selection`: batch-операции.
+[x] `Dialog`: кнопки активного диалога (`OK/Cancel/Apply`).
+[x] Подсветка disabled/active состояний для прозрачного UX.
 
 ## Step 16: Полировка и валидация итерации 2
 [] Smoke-сценарии для multi-select и batch copy/move/delete.

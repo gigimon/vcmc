@@ -46,7 +46,7 @@ pub fn render(frame: &mut Frame, state: &AppState) {
 
     render_status(frame, chunks[2], state);
     render_log(frame, chunks[3], state);
-    render_help(frame, chunks[4]);
+    render_footer(frame, chunks[4], state);
 
     if let Some(dialog) = &state.dialog {
         render_dialog(frame, dialog);
@@ -268,11 +268,162 @@ fn render_log(frame: &mut Frame, area: Rect, state: &AppState) {
     frame.render_widget(log, area);
 }
 
-fn render_help(frame: &mut Frame, area: Rect) {
-    let help = Paragraph::new(
-        "Tab switch  Arrows move  Shift+Arrows range  Space/Ins mark  +/-/* mask ops  / search  F5/F6 rename-op  F7 mkdir  F8 delete  Dialog: Tab/Shift+Tab, Left/Right, Enter, Esc, Alt+hotkey",
-    );
-    frame.render_widget(help, area);
+fn render_footer(frame: &mut Frame, area: Rect, state: &AppState) {
+    let active_panel = match state.active_panel {
+        PanelId::Left => &state.left_panel,
+        PanelId::Right => &state.right_panel,
+    };
+    let mode = footer_mode(state, active_panel);
+
+    let mut spans = vec![Span::styled(
+        format!("[{}] ", footer_mode_label(mode)),
+        Style::default()
+            .fg(Color::Black)
+            .bg(Color::White)
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    for button in build_footer_buttons(state, active_panel, mode) {
+        let style = if !button.enabled {
+            Style::default().fg(Color::DarkGray)
+        } else if button.active {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White).bg(Color::DarkGray)
+        };
+        spans.push(Span::styled(
+            format!("[{} {}] ", button.key, button.label),
+            style,
+        ));
+    }
+
+    let footer = Paragraph::new(Line::from(spans));
+    frame.render_widget(footer, area);
+}
+
+fn footer_mode(state: &AppState, panel: &PanelState) -> FooterMode {
+    if state.dialog.is_some() {
+        FooterMode::Dialog
+    } else if !panel.selected_paths.is_empty() {
+        FooterMode::Selection
+    } else {
+        FooterMode::Normal
+    }
+}
+
+fn footer_mode_label(mode: FooterMode) -> &'static str {
+    match mode {
+        FooterMode::Normal => "NORMAL",
+        FooterMode::Selection => "SELECTION",
+        FooterMode::Dialog => "DIALOG",
+    }
+}
+
+fn build_footer_buttons(
+    state: &AppState,
+    panel: &PanelState,
+    mode: FooterMode,
+) -> Vec<FooterButtonSpec> {
+    match mode {
+        FooterMode::Normal => {
+            let current_entry_operable = panel
+                .selected_entry()
+                .is_some_and(|entry| !entry.is_virtual);
+            vec![
+                FooterButtonSpec::new("F1", "Help", false, false),
+                FooterButtonSpec::new("F2", "Sort", true, false),
+                FooterButtonSpec::new("F3", "View", false, false),
+                FooterButtonSpec::new("F4", "Edit", false, false),
+                FooterButtonSpec::new("F5", "Copy", current_entry_operable, false),
+                FooterButtonSpec::new("F6", "Move", current_entry_operable, false),
+                FooterButtonSpec::new("F7", "Mkdir", true, false),
+                FooterButtonSpec::new("F8", "Delete", current_entry_operable, false),
+                FooterButtonSpec::new("F9", "Menu", false, false),
+                FooterButtonSpec::new("F10", "Quit", true, false),
+            ]
+        }
+        FooterMode::Selection => vec![
+            FooterButtonSpec::new("F1", "Help", false, false),
+            FooterButtonSpec::new("F2", "Sort", true, false),
+            FooterButtonSpec::new("F3", "View", false, false),
+            FooterButtonSpec::new("F4", "Edit", false, false),
+            FooterButtonSpec::new("F5", "Copy", true, true),
+            FooterButtonSpec::new("F6", "Move", true, true),
+            FooterButtonSpec::new("F7", "Mkdir", true, false),
+            FooterButtonSpec::new("F8", "Delete", true, true),
+            FooterButtonSpec::new("F9", "Menu", false, false),
+            FooterButtonSpec::new("F10", "Quit", true, false),
+        ],
+        FooterMode::Dialog => {
+            let mut buttons = vec![
+                FooterButtonSpec::new("Tab", "Next", true, false),
+                FooterButtonSpec::new("S-Tab", "Prev", true, false),
+                FooterButtonSpec::new("Left/Right", "Focus", true, false),
+            ];
+
+            if let Some(dialog) = state.dialog.as_ref() {
+                if let Some(primary) = dialog.buttons.first() {
+                    let key = if let Some(acc) = primary.accelerator {
+                        format!("Alt+{}", acc.to_ascii_uppercase())
+                    } else {
+                        "Enter".to_string()
+                    };
+                    buttons.push(FooterButtonSpec::new(
+                        key.as_str(),
+                        primary.label.as_str(),
+                        true,
+                        dialog.focused_button == 0,
+                    ));
+                }
+
+                if let Some(secondary) = dialog.buttons.get(1) {
+                    let key = if let Some(acc) = secondary.accelerator {
+                        format!("Alt+{}", acc.to_ascii_uppercase())
+                    } else {
+                        "Esc".to_string()
+                    };
+                    buttons.push(FooterButtonSpec::new(
+                        key.as_str(),
+                        secondary.label.as_str(),
+                        true,
+                        dialog.focused_button == 1,
+                    ));
+                } else {
+                    buttons.push(FooterButtonSpec::new("Esc", "Close", true, false));
+                }
+            }
+
+            buttons
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum FooterMode {
+    Normal,
+    Selection,
+    Dialog,
+}
+
+struct FooterButtonSpec {
+    key: String,
+    label: String,
+    enabled: bool,
+    active: bool,
+}
+
+impl FooterButtonSpec {
+    fn new(key: &str, label: &str, enabled: bool, active: bool) -> Self {
+        Self {
+            key: key.to_string(),
+            label: label.to_string(),
+            enabled,
+            active,
+        }
+    }
 }
 
 fn render_dialog(frame: &mut Frame, dialog: &DialogState) {

@@ -1147,6 +1147,7 @@ fn map_key_to_command(key: &KeyEvent) -> Option<Command> {
         KeyCode::F(6) => Some(Command::Move),
         KeyCode::F(7) => Some(Command::Mkdir),
         KeyCode::F(8) => Some(Command::Delete),
+        KeyCode::F(10) => Some(Command::Quit),
         KeyCode::F(2) => Some(Command::ToggleSort),
         KeyCode::Char('r') => Some(Command::Refresh),
         KeyCode::Char('/') if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT => {
