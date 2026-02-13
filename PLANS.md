@@ -297,10 +297,10 @@ MVP-функции (итерация 1):
 [x] Обновить обработку ошибок и activity log для прозрачного post-mortem.
 
 ## Step 30: Архивы как VFS (zip/tar/tar.gz)
-[] Ввести `ArchiveFs` backend и подключение как panel-mode поверх существующей `FsBackend` абстракции.
-[] Реализовать вход в архив по `Enter` как в каталог и навигацию внутри архива.
-[] Поддержать операции v1: browse + copy out (`archive -> local/sftp`), copy in как отдельный этап.
-[] Добавить явную индикацию, что панель находится в архивном VFS-режиме.
+[x] Ввести `ArchiveFs` backend и подключение как panel-mode поверх существующей `FsBackend` абстракции.
+[x] Реализовать вход в архив по `Enter` как в каталог и навигацию внутри архива.
+[x] Поддержать операции v1: browse + copy out (`archive -> local/sftp`), copy in как отдельный этап.
+[x] Добавить явную индикацию, что панель находится в архивном VFS-режиме.
 
 ## Step 31: Find file через `fd` и panelized results
 [] Добавить команду поиска файлов на базе внешнего `fd` (`name`, `glob`, optional hidden/follow symlinks).

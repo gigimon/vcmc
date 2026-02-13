@@ -247,8 +247,9 @@ fn render_panel(
     };
 
     let title = format!(
-        "{name} [{}] {}{}",
+        "{name} [{}] <{}> {}{}",
         sort_label(panel.sort_mode),
+        panel.backend_label,
         panel.cwd.display(),
         search_suffix(panel),
     );

@@ -22,6 +22,7 @@ Implemented:
 - context-sensitive footer menu (MC-style) for `Normal`, `Selection`, `Dialog`, and `Viewer` modes
 - top menu bar (MC-like) with keyboard navigation and action groups
 - backend abstraction with SFTP panel mode (top menu: `Left/Right -> Connect SFTP`)
+- archive VFS panel mode for `zip/tar/tar.gz` (browse + copy out)
 
 ## Run
 
@@ -56,6 +57,8 @@ General:
 - `F9`: open top menu (`Left`, `Options`, `Right`)
 - `F10` or `q`: quit
 - `Alt+L/O/R`: open top menu directly on specific group
+- on local panel: `Enter` on archive file (`.zip`, `.tar`, `.tar.gz`, `.tgz`) opens archive VFS
+- in archive VFS: `Backspace` at `/` closes archive and returns to local panel path
 
 Selection:
 - `Space` / `Ins`: toggle mark on current row
@@ -89,6 +92,11 @@ Remote workflow:
 - use `Tab` to switch between local/remote panels
 - `F5/F6/F8` use the same job model for `local<->sftp` and `sftp->sftp`
 
+Archive workflow:
+- open archive from selected file via `Enter` or `F9 -> Left/Right -> Archive VFS`
+- navigate inside archive with regular panel keys
+- copy from archive to local/sftp with `F5` (including batch selection)
+
 ## Architecture
 
 - UI thread: event loop (`input`, `tick`, `resize`, `worker updates`)
@@ -111,6 +119,7 @@ Security notes:
 - `F4` requires `$EDITOR` to be set in environment
 - SFTP backend uses short connection retries with timeout guards
 - SFTP smoke checks are optional and run only when `VCMC_SFTP_SMOKE_*` env is configured
+- archive VFS is read-only in v1 (no create/delete/move/write inside archive)
 
 ## Known UX Constraints
 
@@ -120,6 +129,8 @@ Security notes:
 - there is no internal editor yet (external `$EDITOR` only)
 - viewer/editor currently operate on local files only (SFTP preview/edit not yet wired)
 - SFTP smoke integration requires explicit test host env (not auto-run by default)
+- archive VFS open is currently local-only (no direct open from SFTP file yet)
+- copy into archive VFS is not implemented yet (copy out only)
 
 ## Backlog (next)
 
@@ -127,6 +138,6 @@ Security notes:
 - search in viewer
 - internal editor mode
 - tabs/bookmarks/favorites
-- archive operations (zip/tar)
+- archive write/update operations
 - optional Trash mode for safer delete behavior
 - configurable keymap

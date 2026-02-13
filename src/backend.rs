@@ -1,5 +1,6 @@
 #![allow(dead_code)]
 
+use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -9,10 +10,16 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
+use flate2::read::GzDecoder;
 use ssh2::{FileStat, OpenFlags, OpenType, RenameFlags, Session, Sftp};
+use tar::Archive as TarArchive;
+use zip::ZipArchive;
 
 use crate::fs::FsAdapter;
-use crate::model::{BackendSpec, FsEntry, FsEntryType, SftpAuth, SftpConnectionInfo, SortMode};
+use crate::model::{
+    ArchiveConnectionInfo, BackendSpec, FsEntry, FsEntryType, SftpAuth, SftpConnectionInfo,
+    SortMode,
+};
 
 const S_IFMT: u32 = 0o170000;
 const S_IFDIR: u32 = 0o040000;
@@ -38,6 +45,7 @@ pub fn backend_from_spec(spec: &BackendSpec) -> Arc<dyn FsBackend> {
     match spec {
         BackendSpec::Local => Arc::new(LocalFsBackend::default()),
         BackendSpec::Sftp(info) => Arc::new(SftpFsBackend::new(info.clone())),
+        BackendSpec::Archive(info) => Arc::new(ArchiveFsBackend::new(info.clone())),
     }
 }
 
@@ -305,6 +313,491 @@ impl FsBackend for SftpFsBackend {
         )?;
         file.write_all(bytes)?;
         Ok(())
+    }
+}
+
+pub struct ArchiveFsBackend {
+    conn: ArchiveConnectionInfo,
+}
+
+impl ArchiveFsBackend {
+    pub fn new(conn: ArchiveConnectionInfo) -> Self {
+        Self { conn }
+    }
+
+    fn index(&self) -> Result<ArchiveIndex> {
+        build_archive_index(self.conn.archive_path.as_path())
+    }
+}
+
+impl FsBackend for ArchiveFsBackend {
+    fn backend_name(&self) -> &'static str {
+        "archive"
+    }
+
+    fn list_dir(
+        &self,
+        path: &Path,
+        sort_mode: SortMode,
+        show_hidden: bool,
+    ) -> Result<Vec<FsEntry>> {
+        let normalized = self.normalize_existing_path("list_dir", path)?;
+        let index = self.index()?;
+        let entry = index.entries.get(&normalized).ok_or_else(|| {
+            anyhow::anyhow!("path not found in archive: {}", normalized.display())
+        })?;
+        if entry.entry_type != FsEntryType::Directory {
+            bail!(
+                "path is not a directory in archive: {}",
+                normalized.display()
+            );
+        }
+
+        let mut entries = Vec::new();
+        if let Some(children) = index.children.get(&normalized) {
+            for child_path in children {
+                if let Some(child) = index.entries.get(child_path) {
+                    if !show_hidden && child.is_hidden {
+                        continue;
+                    }
+                    entries.push(child.clone());
+                }
+            }
+        }
+
+        sort_entries(entries.as_mut_slice(), sort_mode);
+        if normalized != Path::new("/") {
+            if let Some(parent) = normalized.parent() {
+                entries.insert(0, parent_link(parent.to_path_buf()));
+            } else {
+                entries.insert(0, parent_link(PathBuf::from("/")));
+            }
+        }
+        Ok(entries)
+    }
+
+    fn stat_entry(&self, path: &Path) -> Result<FsEntry> {
+        let normalized = self.normalize_existing_path("stat", path)?;
+        let index = self.index()?;
+        index
+            .entries
+            .get(&normalized)
+            .cloned()
+            .ok_or_else(|| anyhow::anyhow!("path not found in archive: {}", normalized.display()))
+    }
+
+    fn create_dir(&self, path: &Path) -> Result<()> {
+        bail!(
+            "archive backend is read-only (mkdir is unsupported): {}",
+            path.display()
+        )
+    }
+
+    fn remove_path(&self, path: &Path) -> Result<()> {
+        bail!(
+            "archive backend is read-only (remove is unsupported): {}",
+            path.display()
+        )
+    }
+
+    fn move_path(&self, source: &Path, destination: &Path) -> Result<PathBuf> {
+        bail!(
+            "archive backend is read-only (move is unsupported): {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    }
+
+    fn copy_path(&self, source: &Path, destination: &Path) -> Result<PathBuf> {
+        bail!(
+            "archive backend is read-only (copy inside archive is unsupported): {} -> {}",
+            source.display(),
+            destination.display()
+        )
+    }
+
+    fn normalize_existing_path(&self, _operation: &'static str, path: &Path) -> Result<PathBuf> {
+        let normalized = normalize_archive_virtual_path(path);
+        if normalized == Path::new("/") {
+            return Ok(normalized);
+        }
+        let index = self.index()?;
+        if index.entries.contains_key(&normalized) {
+            Ok(normalized)
+        } else {
+            bail!("path not found in archive: {}", normalized.display())
+        }
+    }
+
+    fn normalize_new_path(&self, _operation: &'static str, path: &Path) -> Result<PathBuf> {
+        Ok(normalize_archive_virtual_path(path))
+    }
+
+    fn read_file(&self, path: &Path) -> Result<Vec<u8>> {
+        let normalized = self.normalize_existing_path("read", path)?;
+        let index = self.index()?;
+        let entry = index.entries.get(&normalized).ok_or_else(|| {
+            anyhow::anyhow!("path not found in archive: {}", normalized.display())
+        })?;
+        if entry.entry_type == FsEntryType::Directory {
+            bail!(
+                "cannot read directory from archive: {}",
+                normalized.display()
+            );
+        }
+        read_archive_member(
+            self.conn.archive_path.as_path(),
+            normalized.as_path(),
+            detect_archive_format(self.conn.archive_path.as_path())
+                .ok_or_else(|| anyhow::anyhow!("unsupported archive format"))?,
+        )
+    }
+
+    fn write_file(&self, path: &Path, _bytes: &[u8]) -> Result<()> {
+        bail!(
+            "archive backend is read-only (write is unsupported): {}",
+            path.display()
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ArchiveFormat {
+    Zip,
+    Tar,
+    TarGz,
+}
+
+struct ArchiveIndex {
+    entries: HashMap<PathBuf, FsEntry>,
+    children: HashMap<PathBuf, Vec<PathBuf>>,
+}
+
+impl ArchiveIndex {
+    fn new() -> Self {
+        Self {
+            entries: HashMap::new(),
+            children: HashMap::new(),
+        }
+    }
+
+    fn insert_directory(&mut self, path: PathBuf) {
+        if path == Path::new("/") {
+            self.entries.entry(path.clone()).or_insert(FsEntry {
+                name: "/".to_string(),
+                path: path.clone(),
+                entry_type: FsEntryType::Directory,
+                size_bytes: 0,
+                modified_at: None,
+                is_executable: false,
+                is_hidden: false,
+                is_virtual: false,
+            });
+            return;
+        }
+
+        self.ensure_parent_chain(path.as_path());
+        if !self.entries.contains_key(&path) {
+            let name = path
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| path.display().to_string());
+            self.entries.insert(
+                path.clone(),
+                FsEntry {
+                    name: name.clone(),
+                    path: path.clone(),
+                    entry_type: FsEntryType::Directory,
+                    size_bytes: 0,
+                    modified_at: None,
+                    is_executable: false,
+                    is_hidden: name.starts_with('.'),
+                    is_virtual: false,
+                },
+            );
+        }
+        self.register_child(path.as_path());
+    }
+
+    fn insert_file(&mut self, path: PathBuf, size_bytes: u64, entry_type: FsEntryType) {
+        self.ensure_parent_chain(path.as_path());
+        let name = path
+            .file_name()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        self.entries.insert(
+            path.clone(),
+            FsEntry {
+                name: name.clone(),
+                path: path.clone(),
+                entry_type,
+                size_bytes,
+                modified_at: None,
+                is_executable: false,
+                is_hidden: name.starts_with('.'),
+                is_virtual: false,
+            },
+        );
+        self.register_child(path.as_path());
+    }
+
+    fn ensure_parent_chain(&mut self, path: &Path) {
+        self.entries.entry(PathBuf::from("/")).or_insert(FsEntry {
+            name: "/".to_string(),
+            path: PathBuf::from("/"),
+            entry_type: FsEntryType::Directory,
+            size_bytes: 0,
+            modified_at: None,
+            is_executable: false,
+            is_hidden: false,
+            is_virtual: false,
+        });
+
+        let mut cursor = PathBuf::from("/");
+        for component in path.components() {
+            if let std::path::Component::Normal(value) = component {
+                cursor.push(value);
+                if cursor == path {
+                    break;
+                }
+                if !self.entries.contains_key(&cursor) {
+                    let name = cursor
+                        .file_name()
+                        .map(|v| v.to_string_lossy().to_string())
+                        .unwrap_or_else(|| cursor.display().to_string());
+                    self.entries.insert(
+                        cursor.clone(),
+                        FsEntry {
+                            name: name.clone(),
+                            path: cursor.clone(),
+                            entry_type: FsEntryType::Directory,
+                            size_bytes: 0,
+                            modified_at: None,
+                            is_executable: false,
+                            is_hidden: name.starts_with('.'),
+                            is_virtual: false,
+                        },
+                    );
+                }
+                self.register_child(cursor.as_path());
+            }
+        }
+    }
+
+    fn register_child(&mut self, path: &Path) {
+        if path == Path::new("/") {
+            return;
+        }
+        let parent = path
+            .parent()
+            .unwrap_or_else(|| Path::new("/"))
+            .to_path_buf();
+        let list = self.children.entry(parent).or_default();
+        let target = path.to_path_buf();
+        if !list.contains(&target) {
+            list.push(target);
+        }
+    }
+}
+
+pub fn is_archive_file_path(path: &Path) -> bool {
+    detect_archive_format(path).is_some()
+}
+
+fn detect_archive_format(path: &Path) -> Option<ArchiveFormat> {
+    let value = path.to_string_lossy().to_ascii_lowercase();
+    if value.ends_with(".zip") {
+        Some(ArchiveFormat::Zip)
+    } else if value.ends_with(".tar.gz") || value.ends_with(".tgz") {
+        Some(ArchiveFormat::TarGz)
+    } else if value.ends_with(".tar") {
+        Some(ArchiveFormat::Tar)
+    } else {
+        None
+    }
+}
+
+fn build_archive_index(archive_path: &Path) -> Result<ArchiveIndex> {
+    let format = detect_archive_format(archive_path)
+        .ok_or_else(|| anyhow::anyhow!("unsupported archive format: {}", archive_path.display()))?;
+    let mut index = ArchiveIndex::new();
+    index.insert_directory(PathBuf::from("/"));
+
+    match format {
+        ArchiveFormat::Zip => build_zip_index(archive_path, &mut index)?,
+        ArchiveFormat::Tar => build_tar_index(archive_path, &mut index, false)?,
+        ArchiveFormat::TarGz => build_tar_index(archive_path, &mut index, true)?,
+    }
+    Ok(index)
+}
+
+fn build_zip_index(archive_path: &Path, index: &mut ArchiveIndex) -> Result<()> {
+    let file = fs::File::open(archive_path)?;
+    let mut archive = ZipArchive::new(file)?;
+    for idx in 0..archive.len() {
+        let file = archive.by_index(idx)?;
+        let Some(path) = archive_member_to_virtual_path(file.name()) else {
+            continue;
+        };
+        if file.is_dir() || file.name().ends_with('/') {
+            index.insert_directory(path);
+        } else {
+            index.insert_file(path, file.size(), FsEntryType::File);
+        }
+    }
+    Ok(())
+}
+
+fn build_tar_index(archive_path: &Path, index: &mut ArchiveIndex, compressed: bool) -> Result<()> {
+    if compressed {
+        let file = fs::File::open(archive_path)?;
+        let decoder = GzDecoder::new(file);
+        let mut archive = TarArchive::new(decoder);
+        for item in archive.entries()? {
+            let entry = item?;
+            register_tar_entry(&entry, index)?;
+        }
+    } else {
+        let file = fs::File::open(archive_path)?;
+        let mut archive = TarArchive::new(file);
+        for item in archive.entries()? {
+            let entry = item?;
+            register_tar_entry(&entry, index)?;
+        }
+    }
+    Ok(())
+}
+
+fn register_tar_entry<R: Read>(entry: &tar::Entry<'_, R>, index: &mut ArchiveIndex) -> Result<()> {
+    let raw = entry.path()?;
+    let Some(path) = archive_member_to_virtual_path(raw.to_string_lossy().as_ref()) else {
+        return Ok(());
+    };
+    let entry_type = entry.header().entry_type();
+    if entry_type.is_dir() {
+        index.insert_directory(path);
+    } else if entry_type.is_symlink() {
+        index.insert_file(path, 0, FsEntryType::Symlink);
+    } else {
+        index.insert_file(path, entry.size(), FsEntryType::File);
+    }
+    Ok(())
+}
+
+fn read_archive_member(
+    archive_path: &Path,
+    member: &Path,
+    format: ArchiveFormat,
+) -> Result<Vec<u8>> {
+    match format {
+        ArchiveFormat::Zip => read_zip_member(archive_path, member),
+        ArchiveFormat::Tar => read_tar_member(archive_path, member, false),
+        ArchiveFormat::TarGz => read_tar_member(archive_path, member, true),
+    }
+}
+
+fn read_zip_member(archive_path: &Path, member: &Path) -> Result<Vec<u8>> {
+    let file = fs::File::open(archive_path)?;
+    let mut archive = ZipArchive::new(file)?;
+    for idx in 0..archive.len() {
+        let mut file = archive.by_index(idx)?;
+        let Some(path) = archive_member_to_virtual_path(file.name()) else {
+            continue;
+        };
+        if path != member {
+            continue;
+        }
+        if file.is_dir() || file.name().ends_with('/') {
+            bail!("archive member is a directory: {}", member.display());
+        }
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        return Ok(bytes);
+    }
+    bail!("archive member not found: {}", member.display())
+}
+
+fn read_tar_member(archive_path: &Path, member: &Path, compressed: bool) -> Result<Vec<u8>> {
+    if compressed {
+        let file = fs::File::open(archive_path)?;
+        let decoder = GzDecoder::new(file);
+        let mut archive = TarArchive::new(decoder);
+        for item in archive.entries()? {
+            let mut entry = item?;
+            let Some(path) =
+                archive_member_to_virtual_path(entry.path()?.to_string_lossy().as_ref())
+            else {
+                continue;
+            };
+            if path != member {
+                continue;
+            }
+            if entry.header().entry_type().is_dir() {
+                bail!("archive member is a directory: {}", member.display());
+            }
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            return Ok(bytes);
+        }
+    } else {
+        let file = fs::File::open(archive_path)?;
+        let mut archive = TarArchive::new(file);
+        for item in archive.entries()? {
+            let mut entry = item?;
+            let Some(path) =
+                archive_member_to_virtual_path(entry.path()?.to_string_lossy().as_ref())
+            else {
+                continue;
+            };
+            if path != member {
+                continue;
+            }
+            if entry.header().entry_type().is_dir() {
+                bail!("archive member is a directory: {}", member.display());
+            }
+            let mut bytes = Vec::new();
+            entry.read_to_end(&mut bytes)?;
+            return Ok(bytes);
+        }
+    }
+    bail!("archive member not found: {}", member.display())
+}
+
+fn archive_member_to_virtual_path(raw: &str) -> Option<PathBuf> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let normalized = trimmed.replace('\\', "/");
+    let stripped = normalized.trim_start_matches('/').trim_end_matches('/');
+    if stripped.is_empty() {
+        return Some(PathBuf::from("/"));
+    }
+    let joined = PathBuf::from("/").join(stripped);
+    Some(normalize_archive_virtual_path(joined.as_path()))
+}
+
+fn normalize_archive_virtual_path(path: &Path) -> PathBuf {
+    let mut out = PathBuf::from("/");
+    for component in path.components() {
+        match component {
+            std::path::Component::RootDir | std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if out != Path::new("/") {
+                    out.pop();
+                    if out.as_os_str().is_empty() {
+                        out = PathBuf::from("/");
+                    }
+                }
+            }
+            std::path::Component::Normal(value) => out.push(value),
+            std::path::Component::Prefix(_) => {}
+        }
+    }
+    if out.as_os_str().is_empty() {
+        PathBuf::from("/")
+    } else {
+        out
     }
 }
 

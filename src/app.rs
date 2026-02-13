@@ -11,13 +11,14 @@ use crossbeam_channel::Sender;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ssh2::Session;
 
-use crate::backend::{FsBackend, backend_from_spec};
+use crate::backend::{FsBackend, backend_from_spec, is_archive_file_path};
 use crate::jobs::WorkerPool;
 use crate::menu::{MenuAction, menu_group_index_by_hotkey, top_menu_groups};
 use crate::model::{
-    AppState, BackendSpec, BatchProgressState, Command, DialogButton, DialogButtonRole,
-    DialogState, DialogTone, Event, FsEntry, FsEntryType, Job, JobKind, JobRequest, JobStatus,
-    JobUpdate, PanelId, ScreenMode, SftpAuth, SftpConnectionInfo, TerminalSize, ViewerState,
+    AppState, ArchiveConnectionInfo, BackendSpec, BatchProgressState, Command, DialogButton,
+    DialogButtonRole, DialogState, DialogTone, Event, FsEntry, FsEntryType, Job, JobKind,
+    JobRequest, JobStatus, JobUpdate, PanelId, ScreenMode, SftpAuth, SftpConnectionInfo,
+    TerminalSize, ViewerState,
 };
 use crate::theme::{DirColorsTheme, load_theme_from_environment};
 use crate::viewer::load_viewer_state;
@@ -568,14 +569,17 @@ impl App {
 
     fn set_panel_backend(&mut self, id: PanelId, spec: BackendSpec) {
         let backend = backend_from_spec(&spec);
+        let label = backend_spec_label(&spec);
         match id {
             PanelId::Left => {
                 self.left_backend = backend;
                 self.left_backend_spec = spec;
+                self.state.left_panel.backend_label = label;
             }
             PanelId::Right => {
                 self.right_backend = backend;
                 self.right_backend_spec = spec;
+                self.state.right_panel.backend_label = label;
             }
         }
     }
@@ -644,6 +648,14 @@ impl App {
             return Ok(false);
         };
 
+        if entry.entry_type != FsEntryType::Directory && !entry.is_virtual {
+            if matches!(self.active_backend_spec(), BackendSpec::Local)
+                && is_archive_file_path(entry.path.as_path())
+            {
+                return self.attach_panel_to_archive(self.state.active_panel, entry.path.clone());
+            }
+        }
+
         if entry.entry_type != FsEntryType::Directory {
             self.push_log(format!("{} is not a directory", entry.name));
             return Ok(true);
@@ -660,7 +672,14 @@ impl App {
     }
 
     fn go_to_parent(&mut self) -> Result<bool> {
+        let panel_id = self.state.active_panel;
         let current = self.active_panel().cwd.clone();
+        if matches!(self.active_backend_spec(), BackendSpec::Archive(_))
+            && current == Path::new("/")
+        {
+            return self.detach_archive_panel(panel_id);
+        }
+
         let Some(parent) = current.parent() else {
             return Ok(false);
         };
@@ -687,6 +706,9 @@ impl App {
             BackendSpec::Sftp(info) => self
                 .active_backend()
                 .normalize_existing_path("home", &info.root_path)?,
+            BackendSpec::Archive(_) => self
+                .active_backend()
+                .normalize_existing_path("home", Path::new("/"))?,
         };
         let panel = self.active_panel_mut();
         panel.cwd = normalized;
@@ -876,7 +898,7 @@ impl App {
             BackendSpec::Sftp(info) => {
                 format!("{}:{}{}", info.host, info.port, info.root_path.display())
             }
-            BackendSpec::Local => "192.168.1.250:22/".to_string(),
+            BackendSpec::Local | BackendSpec::Archive(_) => "192.168.1.250:22/".to_string(),
         };
         self.pending_sftp_connect = Some(PendingSftpConnect {
             panel_id,
@@ -1005,6 +1027,11 @@ impl App {
     }
 
     fn queue_copy(&mut self) -> Result<bool> {
+        if is_archive_backend(self.inactive_backend_spec()) {
+            self.show_alert("copy into archive VFS is not supported yet");
+            return Ok(true);
+        }
+
         if let Some(plan) = self.build_batch_plan_from_selection(JobKind::Copy)? {
             self.state.dialog = Some(confirm_dialog(plan.summary.clone()));
             self.pending_confirmation = Some(PendingConfirmation::Batch(plan));
@@ -1016,6 +1043,15 @@ impl App {
     }
 
     fn queue_move(&mut self) -> Result<bool> {
+        if is_archive_backend(self.active_backend_spec()) {
+            self.show_alert("move from archive VFS is not supported (read-only)");
+            return Ok(true);
+        }
+        if is_archive_backend(self.inactive_backend_spec()) {
+            self.show_alert("move into archive VFS is not supported yet");
+            return Ok(true);
+        }
+
         if let Some(plan) = self.build_batch_plan_from_selection(JobKind::Move)? {
             self.state.dialog = Some(confirm_dialog(plan.summary.clone()));
             self.pending_confirmation = Some(PendingConfirmation::Batch(plan));
@@ -1027,6 +1063,11 @@ impl App {
     }
 
     fn queue_delete(&mut self) -> Result<bool> {
+        if is_archive_backend(self.active_backend_spec()) {
+            self.show_alert("delete inside archive VFS is not supported (read-only)");
+            return Ok(true);
+        }
+
         if let Some(plan) = self.build_batch_plan_from_selection(JobKind::Delete)? {
             self.state.dialog = Some(confirm_dialog(plan.summary.clone()));
             self.pending_confirmation = Some(PendingConfirmation::Batch(plan));
@@ -1151,6 +1192,10 @@ impl App {
     }
 
     fn queue_mkdir(&mut self) -> Result<bool> {
+        if is_archive_backend(self.active_backend_spec()) {
+            self.show_alert("mkdir inside archive VFS is not supported (read-only)");
+            return Ok(true);
+        }
         let target = self.find_available_directory_name(self.active_panel().cwd.clone(), "new_dir");
         self.enqueue_job(JobKind::Mkdir, target, None, "mkdir queued")
     }
@@ -1715,6 +1760,54 @@ impl App {
         panel.selected_index = 0;
         panel.clear_selection_anchor();
         self.reload_panel(panel_id, true)
+    }
+
+    fn attach_panel_to_archive(
+        &mut self,
+        panel_id: PanelId,
+        archive_path: PathBuf,
+    ) -> Result<bool> {
+        if !matches!(self.backend_spec(panel_id), BackendSpec::Local) {
+            return Err(anyhow::anyhow!(
+                "archive VFS can be opened from local panel only in current build"
+            ));
+        }
+        let normalized_archive = self
+            .backend(panel_id)
+            .normalize_existing_path("archive_open", archive_path.as_path())?;
+        if !is_archive_file_path(normalized_archive.as_path()) {
+            return Err(anyhow::anyhow!(
+                "not a supported archive: {}",
+                normalized_archive.display()
+            ));
+        }
+
+        self.set_last_local_cwd(panel_id, self.panel(panel_id).cwd.clone());
+        let backend_spec = BackendSpec::Archive(ArchiveConnectionInfo {
+            archive_path: normalized_archive.clone(),
+        });
+        self.set_panel_backend(panel_id, backend_spec);
+        let panel = self.panel_mut(panel_id);
+        panel.cwd = PathBuf::from("/");
+        panel.selected_index = 0;
+        panel.clear_selection_anchor();
+        let redraw = self.reload_panel(panel_id, true)?;
+        self.push_log(format!("archive opened: {}", normalized_archive.display()));
+        Ok(redraw)
+    }
+
+    fn detach_archive_panel(&mut self, panel_id: PanelId) -> Result<bool> {
+        let BackendSpec::Archive(info) = self.backend_spec(panel_id).clone() else {
+            return Ok(false);
+        };
+        let fallback = info
+            .archive_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| self.last_local_cwd(panel_id));
+        let redraw = self.attach_panel_to_local(panel_id, fallback)?;
+        self.push_log(format!("archive closed: {}", info.archive_path.display()));
+        Ok(redraw)
     }
 
     fn inactive_panel_cwd(&self) -> PathBuf {
@@ -2465,13 +2558,9 @@ impl App {
                 ));
                 Ok(true)
             }
-            MenuAction::PanelArchiveVfsPlanned(panel_id) => {
+            MenuAction::PanelOpenArchiveVfs(panel_id) => {
                 self.state.active_panel = panel_id;
-                self.show_alert(format!(
-                    "Archive VFS is planned for Step 30 ({})",
-                    panel_name(panel_id)
-                ));
-                Ok(true)
+                self.open_selected_archive_from_panel(panel_id)
             }
             MenuAction::ToggleSort => self.toggle_sort(),
             MenuAction::Refresh => self.refresh_all(),
@@ -2493,6 +2582,28 @@ impl App {
     ) -> Result<bool> {
         self.state.active_panel = panel_id;
         action(self)
+    }
+
+    fn open_selected_archive_from_panel(&mut self, panel_id: PanelId) -> Result<bool> {
+        if !matches!(self.backend_spec(panel_id), BackendSpec::Local) {
+            self.show_alert("Archive VFS can be opened from local panel only");
+            return Ok(true);
+        }
+        let entry = self
+            .panel(panel_id)
+            .selected_entry()
+            .ok_or_else(|| anyhow::anyhow!("no selected entry"))?
+            .clone();
+        if entry.entry_type == FsEntryType::Directory {
+            return Err(anyhow::anyhow!("select archive file, not directory"));
+        }
+        if !is_archive_file_path(entry.path.as_path()) {
+            return Err(anyhow::anyhow!(
+                "selected file is not supported archive: {}",
+                entry.name
+            ));
+        }
+        self.attach_panel_to_archive(panel_id, entry.path)
     }
 
     fn handle_search_input(&mut self, key: &KeyEvent) -> Option<bool> {
@@ -2698,7 +2809,7 @@ impl App {
         let panel_id = self.state.active_panel;
         let initial_cwd = match self.backend_spec(panel_id) {
             BackendSpec::Local => self.active_panel().cwd.clone(),
-            BackendSpec::Sftp(_) => self.last_local_cwd(panel_id),
+            BackendSpec::Sftp(_) | BackendSpec::Archive(_) => self.last_local_cwd(panel_id),
         };
         let cwd = if initial_cwd.exists() {
             initial_cwd
@@ -3002,6 +3113,7 @@ fn resolve_command_path(raw_path: &str, current: &Path, backend_spec: &BackendSp
                     info.root_path.clone()
                 }
             }
+            BackendSpec::Archive(_) => PathBuf::from("/"),
         };
     }
 
@@ -3238,6 +3350,25 @@ fn panel_name(panel_id: PanelId) -> &'static str {
     match panel_id {
         PanelId::Left => "left",
         PanelId::Right => "right",
+    }
+}
+
+fn is_archive_backend(spec: &BackendSpec) -> bool {
+    matches!(spec, BackendSpec::Archive(_))
+}
+
+fn backend_spec_label(spec: &BackendSpec) -> String {
+    match spec {
+        BackendSpec::Local => "local".to_string(),
+        BackendSpec::Sftp(info) => format!("sftp:{}@{}", info.user, info.host),
+        BackendSpec::Archive(info) => {
+            let name = info
+                .archive_path
+                .file_name()
+                .map(|value| value.to_string_lossy().to_string())
+                .unwrap_or_else(|| info.archive_path.display().to_string());
+            format!("archive:{name}")
+        }
     }
 }
 

@@ -32,9 +32,15 @@ pub struct SftpConnectionInfo {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArchiveConnectionInfo {
+    pub archive_path: PathBuf,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BackendSpec {
     Local,
     Sftp(SftpConnectionInfo),
+    Archive(ArchiveConnectionInfo),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +82,7 @@ pub struct FsEntry {
 
 #[derive(Debug, Clone)]
 pub struct PanelState {
+    pub backend_label: String,
     pub cwd: PathBuf,
     pub all_entries: Vec<FsEntry>,
     pub entries: Vec<FsEntry>,
@@ -91,6 +98,7 @@ pub struct PanelState {
 impl PanelState {
     pub fn new(cwd: PathBuf) -> Self {
         Self {
+            backend_label: "local".to_string(),
             cwd,
             all_entries: Vec::new(),
             entries: Vec::new(),

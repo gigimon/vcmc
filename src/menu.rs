@@ -10,10 +10,10 @@ pub enum MenuAction {
     PanelDelete(PanelId),
     PanelMkdir(PanelId),
     PanelConnectSftp(PanelId),
+    PanelOpenArchiveVfs(PanelId),
     PanelOpenShell(PanelId),
     PanelOpenCommandLine(PanelId),
     PanelFindFdPlanned(PanelId),
-    PanelArchiveVfsPlanned(PanelId),
     ToggleSort,
     Refresh,
     ViewerModesPlanned,
@@ -72,7 +72,7 @@ const LEFT_ITEMS: [MenuItemSpec; 14] = [
     MenuItemSpec::action("Find (fd)", MenuAction::PanelFindFdPlanned(PanelId::Left)),
     MenuItemSpec::action(
         "Archive VFS",
-        MenuAction::PanelArchiveVfsPlanned(PanelId::Left),
+        MenuAction::PanelOpenArchiveVfs(PanelId::Left),
     ),
 ];
 
@@ -102,7 +102,7 @@ const RIGHT_ITEMS: [MenuItemSpec; 14] = [
     MenuItemSpec::action("Find (fd)", MenuAction::PanelFindFdPlanned(PanelId::Right)),
     MenuItemSpec::action(
         "Archive VFS",
-        MenuAction::PanelArchiveVfsPlanned(PanelId::Right),
+        MenuAction::PanelOpenArchiveVfs(PanelId::Right),
     ),
 ];
 
