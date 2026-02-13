@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::env;
+use std::fs;
 use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
@@ -48,6 +49,7 @@ pub struct App {
     pending_sftp_connect: Option<PendingSftpConnect>,
     pending_conflict: Option<PendingConflict>,
     pending_find: Option<PendingFind>,
+    pending_editor_choice: Option<PendingEditorChoice>,
     pending_viewer_search: bool,
     batch_progress: HashMap<u64, BatchProgress>,
     left_active_find_id: Option<u64>,
@@ -89,6 +91,22 @@ struct PendingFind {
     panel_id: PanelId,
     root: PathBuf,
     default_hidden: bool,
+}
+
+struct PendingEditorChoice {
+    context: EditorChoiceContext,
+    options: Vec<EditorCandidate>,
+}
+
+enum EditorChoiceContext {
+    OpenFile(PathBuf),
+    SettingsOnly,
+}
+
+#[derive(Clone)]
+struct EditorCandidate {
+    label: String,
+    command: String,
 }
 
 #[derive(Clone)]
@@ -196,6 +214,7 @@ impl App {
             pending_sftp_connect: None,
             pending_conflict: None,
             pending_find: None,
+            pending_editor_choice: None,
             pending_viewer_search: false,
             batch_progress: HashMap::new(),
             left_active_find_id: None,
@@ -291,6 +310,7 @@ impl App {
                 self.pending_sftp_connect = None;
                 self.pending_conflict = None;
                 self.pending_find = None;
+                self.pending_editor_choice = None;
                 self.pending_viewer_search = false;
                 self.state.dialog = None;
                 Ok(true)
@@ -904,6 +924,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_editor_choice = None;
         self.pending_viewer_search = false;
         self.state.dialog = None;
         self.state.viewer = Some(viewer_state);
@@ -926,18 +947,21 @@ impl App {
             ));
         }
 
-        let editor = std::env::var("EDITOR")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty());
-        let Some(editor) = editor else {
-            self.show_alert("EDITOR is not set. Example: export EDITOR='nvim'");
-            return Ok(true);
-        };
-
         let path = self
             .active_backend()
             .normalize_existing_path("edit", &entry.path)?;
+        if let Some(editor) = self.resolve_editor_command() {
+            return self.run_editor_with_command(editor.as_str(), path.as_path());
+        }
+
+        self.start_editor_chooser(EditorChoiceContext::OpenFile(path))
+    }
+
+    fn run_editor_with_command(&mut self, editor: &str, path: &Path) -> Result<bool> {
+        if editor.trim().is_empty() {
+            self.show_alert("editor command is empty");
+            return Ok(true);
+        }
 
         runtime::set_input_poll_paused(true);
         if let Err(err) = terminal::suspend_for_external_process() {
@@ -945,7 +969,7 @@ impl App {
             return Err(err);
         }
 
-        let run_result = run_external_editor_command(editor.as_str(), &path);
+        let run_result = run_external_editor_command(editor, path);
         let resume_result = terminal::resume_after_external_process();
         runtime::set_input_poll_paused(false);
 
@@ -959,8 +983,58 @@ impl App {
 
         self.reload_panel(PanelId::Left, false)?;
         self.reload_panel(PanelId::Right, false)?;
-        self.push_log(format!("editor closed: {}", path.display()));
+        self.push_log(format!("editor closed ({editor}): {}", path.display()));
         Ok(true)
+    }
+
+    fn open_editor_settings(&mut self) -> Result<bool> {
+        self.start_editor_chooser(EditorChoiceContext::SettingsOnly)
+    }
+
+    fn start_editor_chooser(&mut self, context: EditorChoiceContext) -> Result<bool> {
+        let candidates = detect_editor_candidates();
+        if candidates.is_empty() {
+            self.show_alert(
+                "No supported editors found in PATH (nvim/vim/nano/hx/micro/emacs/code)",
+            );
+            return Ok(true);
+        }
+
+        let preferred = self.resolve_editor_command();
+        let default_choice = preferred
+            .as_ref()
+            .and_then(|value| candidates.iter().position(|item| item.command == *value))
+            .map(|idx| idx + 1)
+            .unwrap_or(1);
+
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.pending_sftp_connect = None;
+        self.pending_conflict = None;
+        self.pending_find = None;
+        self.pending_editor_choice = Some(PendingEditorChoice {
+            context,
+            options: candidates.clone(),
+        });
+        self.pending_viewer_search = false;
+        self.state.dialog = Some(input_dialog(
+            "Editor Setup",
+            build_editor_choice_body(candidates.as_slice()).as_str(),
+            default_choice.to_string(),
+            DialogTone::Warning,
+        ));
+        self.state.status_line = "editor setup: choose preferred editor number".to_string();
+        Ok(true)
+    }
+
+    fn resolve_editor_command(&self) -> Option<String> {
+        env::var("EDITOR")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .or_else(load_saved_editor_command)
     }
 
     fn close_viewer(&mut self) -> Result<bool> {
@@ -1111,6 +1185,7 @@ impl App {
         self.pending_mask = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_editor_choice = None;
         self.pending_viewer_search = false;
         let default_value = match self.backend_spec(panel_id) {
             BackendSpec::Sftp(info) => {
@@ -1149,6 +1224,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_editor_choice = None;
         self.pending_viewer_search = false;
         self.state.dialog = None;
 
@@ -1174,6 +1250,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_editor_choice = None;
         self.pending_viewer_search = false;
         self.state.dialog = None;
         self.input_mode = Some(InputMode::Search(panel_id));
@@ -1257,6 +1334,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_editor_choice = None;
         self.pending_viewer_search = false;
         self.pending_mask = Some(PendingMask { panel_id, select });
         let title = if select {
@@ -1466,6 +1544,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_editor_choice = None;
         self.pending_viewer_search = false;
         let destination_dir = self.inactive_panel_cwd();
         self.pending_rename = Some(PendingRename {
@@ -2366,8 +2445,20 @@ impl App {
                 self.apply_find()
             } else {
                 self.pending_find = None;
+                self.pending_editor_choice = None;
                 self.state.dialog = None;
                 self.push_log("find canceled");
+                true
+            };
+        }
+
+        if self.pending_editor_choice.is_some() {
+            return if role == DialogButtonRole::Primary {
+                self.apply_editor_choice()
+            } else {
+                self.pending_editor_choice = None;
+                self.state.dialog = None;
+                self.push_log("editor setup canceled");
                 true
             };
         }
@@ -2425,8 +2516,16 @@ impl App {
 
         if self.pending_find.is_some() {
             self.pending_find = None;
+            self.pending_editor_choice = None;
             self.state.dialog = None;
             self.push_log("find canceled");
+            return true;
+        }
+
+        if self.pending_editor_choice.is_some() {
+            self.pending_editor_choice = None;
+            self.state.dialog = None;
+            self.push_log("editor setup canceled");
             return true;
         }
 
@@ -2718,6 +2817,64 @@ impl App {
         true
     }
 
+    fn apply_editor_choice(&mut self) -> bool {
+        let pending = self.pending_editor_choice.take();
+        let value = self
+            .state
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.input_value.as_ref())
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        self.state.dialog = None;
+
+        let Some(pending) = pending else {
+            return true;
+        };
+        let choice = if value.is_empty() {
+            1
+        } else {
+            value.parse::<usize>().unwrap_or(0)
+        };
+        if choice == 0 || choice > pending.options.len() {
+            self.show_alert(format!(
+                "invalid editor choice '{}', expected 1..{}",
+                value,
+                pending.options.len()
+            ));
+            return true;
+        }
+
+        let selected = pending.options[choice - 1].clone();
+        if let Err(err) = save_editor_command(selected.command.as_str()) {
+            self.show_alert(format!("cannot save editor config: {err}"));
+            return true;
+        }
+
+        match pending.context {
+            EditorChoiceContext::OpenFile(path) => {
+                match self.run_editor_with_command(selected.command.as_str(), path.as_path()) {
+                    Ok(redraw) => redraw,
+                    Err(err) => {
+                        self.show_alert(err.to_string());
+                        true
+                    }
+                }
+            }
+            EditorChoiceContext::SettingsOnly => {
+                self.push_log(format!("editor saved: {}", selected.command));
+                if env::var("EDITOR")
+                    .ok()
+                    .map(|value| !value.trim().is_empty())
+                    .unwrap_or(false)
+                {
+                    self.push_log("note: $EDITOR overrides saved editor for current session");
+                }
+                true
+            }
+        }
+    }
+
     fn apply_viewer_search(&mut self) -> bool {
         let query = self
             .state
@@ -2820,6 +2977,7 @@ impl App {
             && self.pending_mask.is_none()
             && self.pending_sftp_connect.is_none()
             && self.pending_find.is_none()
+            && self.pending_editor_choice.is_none()
             && !self.pending_viewer_search
         {
             return false;
@@ -2838,6 +2996,7 @@ impl App {
             && self.pending_mask.is_none()
             && self.pending_sftp_connect.is_none()
             && self.pending_find.is_none()
+            && self.pending_editor_choice.is_none()
             && !self.pending_viewer_search
         {
             return false;
@@ -3094,10 +3253,7 @@ impl App {
                 );
                 Ok(true)
             }
-            MenuAction::EditorSettingsPlanned => {
-                self.show_alert("Editor chooser/settings are planned for Step 33");
-                Ok(true)
-            }
+            MenuAction::EditorSettings => self.open_editor_settings(),
         }
     }
 
@@ -3438,6 +3594,7 @@ impl App {
         self.pending_sftp_connect = None;
         self.pending_conflict = None;
         self.pending_find = None;
+        self.pending_editor_choice = None;
         self.pending_viewer_search = false;
         self.state.dialog = Some(alert_dialog(message.clone()));
         self.push_log(message);
@@ -3534,6 +3691,167 @@ fn run_external_editor_command(editor: &str, path: &Path) -> Result<std::process
     let mut cmd = ProcessCommand::new("sh");
     cmd.arg("-lc").arg(command_line);
     run_status_with_sigint_protection(&mut cmd, "failed to launch EDITOR")
+}
+
+fn detect_editor_candidates() -> Vec<EditorCandidate> {
+    let definitions = [
+        ("Neovim", "nvim"),
+        ("Vim", "vim"),
+        ("Nano", "nano"),
+        ("Helix", "hx"),
+        ("Micro", "micro"),
+        ("Emacs", "emacs"),
+        ("VS Code", "code -w"),
+    ];
+    let mut candidates = Vec::new();
+    for (label, command) in definitions {
+        let binary = command.split_whitespace().next().unwrap_or_default();
+        if command_in_path(binary) {
+            candidates.push(EditorCandidate {
+                label: format!("{label} ({command})"),
+                command: command.to_string(),
+            });
+        }
+    }
+    candidates
+}
+
+fn build_editor_choice_body(options: &[EditorCandidate]) -> String {
+    let mut lines = Vec::with_capacity(options.len() + 3);
+    lines.push("Choose default editor (used when $EDITOR is unset):".to_string());
+    for (idx, option) in options.iter().enumerate() {
+        lines.push(format!("{}: {}", idx + 1, option.label));
+    }
+    lines.push(String::new());
+    lines.push("Enter number, then Apply.".to_string());
+    lines.join("\n")
+}
+
+fn load_saved_editor_command() -> Option<String> {
+    let path = editor_config_path()?;
+    let content = fs::read_to_string(path).ok()?;
+    for line in content.lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = trimmed.split_once('=') else {
+            continue;
+        };
+        if key.trim() != "editor" {
+            continue;
+        }
+        let parsed = parse_editor_value(value.trim());
+        if parsed.is_some() {
+            return parsed;
+        }
+    }
+    None
+}
+
+fn save_editor_command(command: &str) -> Result<()> {
+    let path = editor_config_path()
+        .ok_or_else(|| anyhow::anyhow!("cannot resolve config path (HOME/XDG_CONFIG_HOME)"))?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let content = format!(
+        "# vcmc config\neditor = \"{}\"\n",
+        escape_toml_string(command.trim())
+    );
+    fs::write(path, content)?;
+    Ok(())
+}
+
+fn editor_config_path() -> Option<PathBuf> {
+    if let Some(base) = env::var_os("XDG_CONFIG_HOME") {
+        let base = PathBuf::from(base);
+        if !base.as_os_str().is_empty() {
+            return Some(base.join("vcmc").join("config.toml"));
+        }
+    }
+    env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join(".config").join("vcmc").join("config.toml"))
+}
+
+fn parse_editor_value(raw: &str) -> Option<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    if raw.starts_with('"') && raw.ends_with('"') && raw.len() >= 2 {
+        let inner = &raw[1..raw.len() - 1];
+        return Some(unescape_toml_string(inner));
+    }
+    Some(raw.to_string())
+}
+
+fn escape_toml_string(raw: &str) -> String {
+    raw.replace('\\', "\\\\").replace('"', "\\\"")
+}
+
+fn unescape_toml_string(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    let mut chars = raw.chars();
+    while let Some(ch) = chars.next() {
+        if ch == '\\' {
+            if let Some(next) = chars.next() {
+                match next {
+                    '\\' => out.push('\\'),
+                    '"' => out.push('"'),
+                    'n' => out.push('\n'),
+                    't' => out.push('\t'),
+                    other => {
+                        out.push('\\');
+                        out.push(other);
+                    }
+                }
+            } else {
+                out.push('\\');
+            }
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+fn command_in_path(binary: &str) -> bool {
+    if binary.trim().is_empty() {
+        return false;
+    }
+    if binary.contains('/') {
+        return is_executable_file(Path::new(binary));
+    }
+    let Some(path_var) = env::var_os("PATH") else {
+        return false;
+    };
+    for dir in env::split_paths(&path_var) {
+        let candidate = dir.join(binary);
+        if is_executable_file(candidate.as_path()) {
+            return true;
+        }
+    }
+    false
+}
+
+fn is_executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Ok(metadata) = path.metadata() {
+            return metadata.permissions().mode() & 0o111 != 0;
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        return true;
+    }
+    false
 }
 
 fn run_shell_command_capture(command: &str, cwd: &Path) -> Result<std::process::Output> {

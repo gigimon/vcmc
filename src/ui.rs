@@ -933,6 +933,8 @@ fn input_label(dialog: &DialogState) -> &'static str {
         "Password"
     } else if title.contains("sftp") && title.contains("key") {
         "Key Path"
+    } else if title.contains("editor") {
+        "Choice"
     } else {
         "Name"
     }

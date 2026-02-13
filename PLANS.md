@@ -315,10 +315,10 @@ MVP-функции (итерация 1):
 [x] Добавить расширенный статус viewer (mode, offset, line/byte position, matches).
 
 ## Step 33: Editor Discovery и first-run chooser для `F4`
-[] При отсутствии `$EDITOR` запускать автообнаружение популярных редакторов (`nvim`, `vim`, `nano`, `hx`, `micro`, `emacs`, `code -w`).
-[] Показать first-run диалог выбора редактора из найденных вариантов.
-[] Сохранять выбор в конфиг (`XDG config`/`~/.config/vcmc`) и использовать как default для `F4`.
-[] Добавить пункт в верхнее меню для смены редактора без перезапуска.
+[x] При отсутствии `$EDITOR` запускать автообнаружение популярных редакторов (`nvim`, `vim`, `nano`, `hx`, `micro`, `emacs`, `code -w`).
+[x] Показать first-run диалог выбора редактора из найденных вариантов.
+[x] Сохранять выбор в конфиг (`XDG config`/`~/.config/vcmc`) и использовать как default для `F4`.
+[x] Добавить пункт в верхнее меню для смены редактора без перезапуска.
 
 ## Step 34: Полировка итерации 5
 [] Добавить smoke-сценарии: conflict-matrix, archive VFS browse/copy out, `fd` find, viewer search/hex, editor chooser.

@@ -17,7 +17,7 @@ pub enum MenuAction {
     ToggleSort,
     Refresh,
     ViewerModesInfo,
-    EditorSettingsPlanned,
+    EditorSettings,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -80,7 +80,7 @@ const OPTIONS_ITEMS: [MenuItemSpec; 4] = [
     MenuItemSpec::action("Sort", MenuAction::ToggleSort),
     MenuItemSpec::action("Refresh", MenuAction::Refresh),
     MenuItemSpec::action("Viewer Modes", MenuAction::ViewerModesInfo),
-    MenuItemSpec::action("Editor Settings", MenuAction::EditorSettingsPlanned),
+    MenuItemSpec::action("Editor Settings", MenuAction::EditorSettings),
 ];
 
 const RIGHT_ITEMS: [MenuItemSpec; 14] = [

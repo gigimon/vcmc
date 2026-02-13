@@ -19,7 +19,7 @@ Implemented:
 - unified dialog kit with buttons, focus, and keyboard navigation
 - fullscreen viewer (`F3`) with smart text/binary-like fallback
 - viewer+ (`F3`) with `text/hex` mode toggle and in-view search (`/`, `n`, `N`)
-- external editor integration (`F4`) via `$EDITOR` with terminal suspend/resume
+- external editor integration (`F4`) with `$EDITOR` or saved chooser fallback
 - context-sensitive footer menu (MC-style) for `Normal`, `Selection`, `Dialog`, and `Viewer` modes
 - top menu bar (MC-like) with keyboard navigation and action groups
 - backend abstraction with SFTP panel mode (top menu: `Left/Right -> Connect SFTP`)
@@ -51,7 +51,7 @@ General:
 - `Ctrl+O`: open interactive local shell in current directory
 - `F2`: cycle sort mode (`name -> size -> mtime`)
 - `F3`: open viewer for current file
-- `F4`: open external editor (`$EDITOR`) for current file
+- `F4`: open external editor for current file (`$EDITOR` or saved editor)
 - `F5`: copy (`selection -> batch`, otherwise current item)
 - `F6`: move (`selection -> batch`, otherwise current item)
 - `F7`: create directory
@@ -60,6 +60,7 @@ General:
 - `F10` or `q`: quit
 - `Alt+L/O/R`: open top menu directly on specific group
 - find dialog: `F9 -> Left/Right -> Find (fd)` then `pattern [--glob] [--hidden] [--follow]`
+- editor chooser: `F9 -> Options -> Editor Settings`
 - on local panel: `Enter` on archive file (`.zip`, `.tar`, `.tar.gz`, `.tgz`) opens archive VFS
 - in archive VFS: `Backspace` at `/` closes archive and returns to local panel path
 
@@ -112,6 +113,12 @@ Find workflow (`fd`):
 - `Enter` on result jumps to source path (`file -> parent dir`, `dir -> open dir`)
 - top virtual item `..` exits find-results view back to normal directory listing
 
+Editor workflow:
+- if `$EDITOR` is set, `F4` uses it
+- if `$EDITOR` is unset, VCMC auto-detects available editors and asks to choose on first use
+- selected editor is saved in config (`$XDG_CONFIG_HOME/vcmc/config.toml` or `~/.config/vcmc/config.toml`)
+- saved editor can be changed anytime via `F9 -> Options -> Editor Settings`
+
 ## Architecture
 
 - UI thread: event loop (`input`, `tick`, `resize`, `worker updates`)
@@ -131,7 +138,6 @@ Security notes:
 - delete is permanent (no Trash integration)
 - command line shell execution is available only on local backend
 - viewer preview reads up to `256 KB` per file in v1
-- `F4` requires `$EDITOR` to be set in environment
 - SFTP backend uses short connection retries with timeout guards
 - SFTP smoke checks are optional and run only when `VCMC_SFTP_SMOKE_*` env is configured
 - archive VFS is read-only in v1 (no create/delete/move/write inside archive)
@@ -144,6 +150,7 @@ Security notes:
 - viewer text rendering truncates very long lines (`512` chars) for stable TUI layout
 - dialog mode uses keyboard-first interaction only (no mouse support)
 - there is no internal editor yet (external `$EDITOR` only)
+- if `$EDITOR` is set, it has priority over saved editor setting
 - editor currently operates on local files only (viewer works for local/sftp/archive preview)
 - SFTP smoke integration requires explicit test host env (not auto-run by default)
 - archive VFS open is currently local-only (no direct open from SFTP file yet)
@@ -152,8 +159,6 @@ Security notes:
 
 ## Backlog (next)
 
-- hex-mode in viewer
-- search in viewer
 - internal editor mode
 - tabs/bookmarks/favorites
 - archive write/update operations
