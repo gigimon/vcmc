@@ -10,6 +10,8 @@ use crate::model::{
     PanelId, PanelState, SortMode,
 };
 
+const COL_SEP: &str = "│";
+
 pub fn render(frame: &mut Frame, state: &AppState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -160,7 +162,7 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
                     ),
                     base_style.patch(type_style(entry)),
                 ));
-                spans.push(Span::styled("|", base_style));
+                spans.push(Span::styled(COL_SEP, base_style));
                 spans.push(Span::styled(
                     format!(
                         "{:>size_width$}",
@@ -169,7 +171,7 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
                     ),
                     base_style,
                 ));
-                spans.push(Span::styled("|", base_style));
+                spans.push(Span::styled(COL_SEP, base_style));
                 spans.push(Span::styled(
                     format!(
                         "{:>modified_width$}",
@@ -191,7 +193,7 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
                     ),
                     base_style.patch(type_style(entry)),
                 ));
-                spans.push(Span::styled("|", base_style));
+                spans.push(Span::styled(COL_SEP, base_style));
                 spans.push(Span::styled(
                     format!(
                         "{:>size_width$}",
@@ -213,6 +215,10 @@ fn build_entry_lines(panel: &PanelState, panel_active: bool, inner: Rect) -> Vec
             }
         }
         lines.push(Line::from(spans));
+    }
+
+    while lines.len() < capacity {
+        lines.push(render_table_empty_line(layout));
     }
 
     lines
@@ -589,7 +595,7 @@ fn render_table_header(layout: TableLayout) -> Line<'static> {
             size_width,
             modified_width,
         } => format!(
-            "{:<name_width$}|{:>size_width$}|{:>modified_width$}",
+            "{:<name_width$}{COL_SEP}{:>size_width$}{COL_SEP}{:>modified_width$}",
             "Name",
             "Size",
             "Modified",
@@ -601,7 +607,7 @@ fn render_table_header(layout: TableLayout) -> Line<'static> {
             name_width,
             size_width,
         } => format!(
-            "{:<name_width$}|{:>size_width$}",
+            "{:<name_width$}{COL_SEP}{:>size_width$}",
             "Name",
             "Size",
             name_width = name_width,
@@ -618,6 +624,39 @@ fn render_table_header(layout: TableLayout) -> Line<'static> {
             .fg(Color::DarkGray)
             .add_modifier(Modifier::BOLD),
     )
+}
+
+fn render_table_empty_line(layout: TableLayout) -> Line<'static> {
+    let text = match layout {
+        TableLayout::Full {
+            name_width,
+            size_width,
+            modified_width,
+        } => format!(
+            "{:<name_width$}{COL_SEP}{:>size_width$}{COL_SEP}{:>modified_width$}",
+            "",
+            "",
+            "",
+            name_width = name_width,
+            size_width = size_width,
+            modified_width = modified_width
+        ),
+        TableLayout::Compact {
+            name_width,
+            size_width,
+        } => format!(
+            "{:<name_width$}{COL_SEP}{:>size_width$}",
+            "",
+            "",
+            name_width = name_width,
+            size_width = size_width
+        ),
+        TableLayout::Minimal { name_width } => {
+            format!("{:<name_width$}", "", name_width = name_width)
+        }
+    };
+
+    Line::styled(text, Style::default().fg(Color::DarkGray))
 }
 
 fn entry_name(entry: &FsEntry) -> String {
