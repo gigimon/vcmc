@@ -38,6 +38,7 @@ pub struct App {
     pending_rename: Option<PendingRename>,
     pending_mask: Option<PendingMask>,
     pending_sftp_connect: Option<PendingSftpConnect>,
+    pending_conflict: Option<PendingConflict>,
     batch_progress: HashMap<u64, BatchProgress>,
     force_full_redraw: bool,
     last_left_local_cwd: PathBuf,
@@ -100,6 +101,7 @@ struct BatchOpItem {
     source: PathBuf,
     destination: Option<PathBuf>,
     name: String,
+    overwrite_destination: bool,
 }
 
 struct BatchPlan {
@@ -115,6 +117,35 @@ struct BatchProgress {
     completed: usize,
     failed: usize,
     current_file: String,
+}
+
+struct PendingConflict {
+    kind: JobKind,
+    batch_id: Option<u64>,
+    items: Vec<BatchOpItem>,
+    next_index: usize,
+    ready: Vec<BatchOpItem>,
+    skipped: usize,
+    apply_all: Option<ConflictPolicy>,
+}
+
+#[derive(Clone, Copy)]
+enum ConflictPolicy {
+    Overwrite,
+    Skip,
+    OverwriteIfNewer,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ConflictAction {
+    Overwrite,
+    Skip,
+    Rename,
+    OverwriteIfNewer,
+    OverwriteAll,
+    SkipAll,
+    OverwriteIfNewerAll,
+    Cancel,
 }
 
 enum InputMode {
@@ -143,6 +174,7 @@ impl App {
             pending_rename: None,
             pending_mask: None,
             pending_sftp_connect: None,
+            pending_conflict: None,
             batch_progress: HashMap::new(),
             force_full_redraw: false,
             last_left_local_cwd: normalized_cwd.clone(),
@@ -232,6 +264,7 @@ impl App {
                 self.pending_rename = None;
                 self.pending_mask = None;
                 self.pending_sftp_connect = None;
+                self.pending_conflict = None;
                 self.state.dialog = None;
                 Ok(true)
             }
@@ -686,6 +719,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_conflict = None;
         self.state.dialog = None;
         self.state.viewer = Some(viewer_state);
         self.state.screen_mode = ScreenMode::Viewer;
@@ -837,6 +871,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_conflict = None;
         let default_value = match self.backend_spec(panel_id) {
             BackendSpec::Sftp(info) => {
                 format!("{}:{}{}", info.host, info.port, info.root_path.display())
@@ -872,6 +907,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_conflict = None;
         self.state.dialog = None;
 
         let local_cwd = self.last_local_cwd(panel_id);
@@ -894,6 +930,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_conflict = None;
         self.state.dialog = None;
         self.input_mode = Some(InputMode::Search(panel_id));
         let query = self.panel_mut(panel_id).search_query.clone();
@@ -939,6 +976,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_sftp_connect = None;
+        self.pending_conflict = None;
         self.pending_mask = Some(PendingMask { panel_id, select });
         let title = if select {
             "Select by mask"
@@ -1065,12 +1103,6 @@ impl App {
                             target.display()
                         ));
                     }
-                    if self.path_exists_on_backend(self.inactive_backend(), &target) {
-                        return Err(anyhow::anyhow!(
-                            "destination already exists: {}",
-                            target.display()
-                        ));
-                    }
                     Some(target)
                 }
                 JobKind::Delete | JobKind::Mkdir => None,
@@ -1088,6 +1120,7 @@ impl App {
                 source,
                 destination,
                 name: entry.name,
+                overwrite_destination: false,
             });
         }
 
@@ -1127,6 +1160,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_conflict = None;
         let destination_dir = self.inactive_panel_cwd();
         self.pending_rename = Some(PendingRename {
             kind,
@@ -1211,51 +1245,402 @@ impl App {
     }
 
     fn execute_batch_plan(&mut self, plan: BatchPlan) -> Result<bool> {
-        let total = plan.items.len();
-        let kind = plan.kind;
-        let batch_id = plan.batch_id;
-        let first_file = plan
-            .items
-            .first()
-            .map(|item| item.name.clone())
-            .unwrap_or_else(|| "-".to_string());
-        if total == 0 {
+        match plan.kind {
+            JobKind::Copy | JobKind::Move => {
+                self.start_conflict_resolution(plan.kind, Some(plan.batch_id), plan.items)
+            }
+            JobKind::Delete | JobKind::Mkdir => {
+                self.enqueue_batch_jobs(plan.kind, Some(plan.batch_id), plan.items, 0)
+            }
+        }
+    }
+
+    fn start_conflict_resolution(
+        &mut self,
+        kind: JobKind,
+        batch_id: Option<u64>,
+        items: Vec<BatchOpItem>,
+    ) -> Result<bool> {
+        if items.is_empty() {
             return Ok(false);
         }
 
-        self.batch_progress.insert(
+        self.pending_conflict = Some(PendingConflict {
+            kind,
             batch_id,
-            BatchProgress {
-                kind,
-                total,
-                completed: 0,
-                failed: 0,
-                current_file: first_file,
-            },
-        );
-        self.sync_visible_batch_progress(Some(batch_id));
+            items,
+            next_index: 0,
+            ready: Vec::new(),
+            skipped: 0,
+            apply_all: None,
+        });
+        self.continue_conflict_resolution()
+    }
 
-        for item in plan.items {
-            if let Err(err) = self.enqueue_job_with_options(
-                kind,
-                item.source,
-                item.destination,
-                Some(batch_id),
-                format!("{} queued: {}", operation_name(kind), item.name),
-                false,
-            ) {
-                self.batch_progress.remove(&batch_id);
-                self.sync_visible_batch_progress(None);
-                return Err(err);
+    fn continue_conflict_resolution(&mut self) -> Result<bool> {
+        loop {
+            let Some(mut pending) = self.pending_conflict.take() else {
+                return Ok(false);
+            };
+
+            if pending.next_index >= pending.items.len() {
+                self.state.dialog = None;
+                return self.finalize_conflict_resolution(pending);
+            }
+
+            let current = pending.items[pending.next_index].clone();
+            let Some(destination) = current.destination.clone() else {
+                pending.ready.push(current);
+                pending.next_index += 1;
+                self.pending_conflict = Some(pending);
+                continue;
+            };
+
+            if !self.path_exists_on_backend(self.inactive_backend(), destination.as_path()) {
+                pending.ready.push(current);
+                pending.next_index += 1;
+                self.pending_conflict = Some(pending);
+                continue;
+            }
+
+            if let Some(policy) = pending.apply_all {
+                self.pending_conflict = Some(pending);
+                let action = match policy {
+                    ConflictPolicy::Overwrite => ConflictAction::Overwrite,
+                    ConflictPolicy::Skip => ConflictAction::Skip,
+                    ConflictPolicy::OverwriteIfNewer => ConflictAction::OverwriteIfNewer,
+                };
+                self.apply_conflict_action(action)?;
+                continue;
+            }
+
+            let title = format!(
+                "Conflict {}/{}",
+                pending.next_index + 1,
+                pending.items.len()
+            );
+            let body = self.build_conflict_dialog_body(&current, destination.as_path());
+            self.state.dialog = Some(conflict_dialog(title, body));
+            self.pending_conflict = Some(pending);
+            return Ok(true);
+        }
+    }
+
+    fn apply_conflict_dialog_action(&mut self, button_idx: usize) -> bool {
+        let Some(action) = self.dialog_conflict_action(button_idx) else {
+            return false;
+        };
+
+        if action == ConflictAction::Cancel {
+            self.pending_conflict = None;
+            self.state.dialog = None;
+            self.push_log("conflict resolution canceled");
+            return true;
+        }
+
+        match self
+            .apply_conflict_action(action)
+            .and_then(|_| self.continue_conflict_resolution())
+        {
+            Ok(redraw) => redraw,
+            Err(err) => {
+                self.show_alert(err.to_string());
+                true
+            }
+        }
+    }
+
+    fn apply_conflict_action(&mut self, action: ConflictAction) -> Result<()> {
+        let Some(mut pending) = self.pending_conflict.take() else {
+            return Ok(());
+        };
+        if pending.next_index >= pending.items.len() {
+            self.pending_conflict = Some(pending);
+            return Ok(());
+        }
+
+        if action == ConflictAction::OverwriteAll {
+            pending.apply_all = Some(ConflictPolicy::Overwrite);
+        } else if action == ConflictAction::SkipAll {
+            pending.apply_all = Some(ConflictPolicy::Skip);
+        } else if action == ConflictAction::OverwriteIfNewerAll {
+            pending.apply_all = Some(ConflictPolicy::OverwriteIfNewer);
+        }
+
+        let mut item = pending.items[pending.next_index].clone();
+        let destination = item
+            .destination
+            .clone()
+            .ok_or_else(|| anyhow::anyhow!("copy/move item has no destination"))?;
+
+        let effective = match action {
+            ConflictAction::OverwriteAll => ConflictAction::Overwrite,
+            ConflictAction::SkipAll => ConflictAction::Skip,
+            ConflictAction::OverwriteIfNewerAll => ConflictAction::OverwriteIfNewer,
+            _ => action,
+        };
+
+        match effective {
+            ConflictAction::Overwrite => {
+                item.overwrite_destination = true;
+                pending.ready.push(item);
+                pending.next_index += 1;
+            }
+            ConflictAction::Skip => {
+                pending.skipped += 1;
+                pending.next_index += 1;
+            }
+            ConflictAction::Rename => {
+                let renamed = self.suggest_renamed_destination(destination.as_path())?;
+                item.destination = Some(renamed.clone());
+                pending.ready.push(item);
+                pending.next_index += 1;
+                self.push_log(format!(
+                    "conflict rename auto: {} -> {}",
+                    destination.display(),
+                    renamed.display()
+                ));
+            }
+            ConflictAction::OverwriteIfNewer => {
+                if self.should_overwrite_if_newer(item.source.as_path(), destination.as_path())? {
+                    item.overwrite_destination = true;
+                    pending.ready.push(item);
+                } else {
+                    pending.skipped += 1;
+                }
+                pending.next_index += 1;
+            }
+            ConflictAction::Cancel
+            | ConflictAction::OverwriteAll
+            | ConflictAction::SkipAll
+            | ConflictAction::OverwriteIfNewerAll => {}
+        }
+
+        self.state.dialog = None;
+        self.pending_conflict = Some(pending);
+        Ok(())
+    }
+
+    fn finalize_conflict_resolution(&mut self, pending: PendingConflict) -> Result<bool> {
+        let destination_backend = backend_from_spec(self.inactive_backend_spec());
+        let mut ready = Vec::with_capacity(pending.ready.len());
+        let mut skipped = pending.skipped;
+
+        for mut item in pending.ready {
+            if item.overwrite_destination {
+                if let Some(destination) = item.destination.as_ref() {
+                    if destination_backend
+                        .stat_entry(destination.as_path())
+                        .is_ok()
+                    {
+                        match destination_backend.remove_path(destination.as_path()) {
+                            Ok(()) => {}
+                            Err(err) => {
+                                skipped += 1;
+                                item.overwrite_destination = false;
+                                self.push_log(format!(
+                                    "overwrite skipped: {} ({err})",
+                                    destination.display()
+                                ));
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
+            ready.push(item);
+        }
+
+        self.enqueue_batch_jobs(pending.kind, pending.batch_id, ready, skipped)
+    }
+
+    fn enqueue_batch_jobs(
+        &mut self,
+        kind: JobKind,
+        batch_id: Option<u64>,
+        items: Vec<BatchOpItem>,
+        skipped: usize,
+    ) -> Result<bool> {
+        if items.is_empty() {
+            if skipped > 0 {
+                self.push_log(format!(
+                    "batch {}: all {} item(s) skipped",
+                    operation_name(kind),
+                    skipped
+                ));
+                return Ok(true);
+            }
+            return Ok(false);
+        }
+
+        if let Some(batch_id) = batch_id {
+            let total = items.len();
+            let first_file = items
+                .first()
+                .map(|item| item.name.clone())
+                .unwrap_or_else(|| "-".to_string());
+            self.batch_progress.insert(
+                batch_id,
+                BatchProgress {
+                    kind,
+                    total,
+                    completed: 0,
+                    failed: 0,
+                    current_file: first_file,
+                },
+            );
+            self.sync_visible_batch_progress(Some(batch_id));
+
+            for item in items {
+                if let Err(err) = self.enqueue_job_with_options(
+                    kind,
+                    item.source,
+                    item.destination,
+                    Some(batch_id),
+                    format!("{} queued: {}", operation_name(kind), item.name),
+                    false,
+                ) {
+                    self.batch_progress.remove(&batch_id);
+                    self.sync_visible_batch_progress(None);
+                    return Err(err);
+                }
+            }
+
+            if skipped > 0 {
+                self.push_log(format!(
+                    "batch {} queued: {} item(s), skipped {}",
+                    operation_name(kind),
+                    total,
+                    skipped
+                ));
+            } else {
+                self.push_log(format!(
+                    "batch {} queued: {} item(s)",
+                    operation_name(kind),
+                    total
+                ));
+            }
+            Ok(true)
+        } else {
+            let mut queued = 0usize;
+            for item in items {
+                let queue_message = copy_move_item_message(kind, &item);
+                self.enqueue_job_with_options(
+                    kind,
+                    item.source,
+                    item.destination,
+                    None,
+                    queue_message,
+                    true,
+                )?;
+                queued += 1;
+            }
+            if skipped > 0 {
+                self.push_log(format!(
+                    "{} queued: {} item(s), skipped {}",
+                    operation_name(kind),
+                    queued,
+                    skipped
+                ));
+            }
+            Ok(true)
+        }
+    }
+
+    fn build_conflict_dialog_body(&self, item: &BatchOpItem, destination: &Path) -> String {
+        let source_meta = self.active_backend().stat_entry(item.source.as_path()).ok();
+        let target_meta = self.inactive_backend().stat_entry(destination).ok();
+        let source_size = source_meta
+            .as_ref()
+            .map(|entry| entry.size_bytes)
+            .unwrap_or(0);
+        let target_size = target_meta
+            .as_ref()
+            .map(|entry| entry.size_bytes)
+            .unwrap_or(0);
+        let source_mtime = source_meta.as_ref().and_then(|entry| entry.modified_at);
+        let target_mtime = target_meta.as_ref().and_then(|entry| entry.modified_at);
+        let newer_hint = match compare_mtime(source_mtime, target_mtime) {
+            Some(std::cmp::Ordering::Greater) => "source newer",
+            Some(std::cmp::Ordering::Less) => "target newer",
+            Some(std::cmp::Ordering::Equal) => "same mtime",
+            None => "mtime unavailable",
+        };
+
+        format!(
+            "{}\nDestination exists:\n{}\n\nsrc: size={} mtime={}\ndst: size={} mtime={}\nhint: {}\n\n[O]verwrite [S]kip [R]ename [N]ewer\n[W]OverwriteAll [K]SkipAll [A]NewerAll [C]ancel",
+            item.name,
+            destination.display(),
+            format_bytes(source_size),
+            format_mtime_hint(source_mtime),
+            format_bytes(target_size),
+            format_mtime_hint(target_mtime),
+            newer_hint,
+        )
+    }
+
+    fn dialog_conflict_action(&self, button_idx: usize) -> Option<ConflictAction> {
+        let label = self
+            .state
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.buttons.get(button_idx))
+            .map(|button| button.label.as_str())?;
+
+        Some(match label {
+            "Overwrite" => ConflictAction::Overwrite,
+            "Skip" => ConflictAction::Skip,
+            "Rename" => ConflictAction::Rename,
+            "Newer" => ConflictAction::OverwriteIfNewer,
+            "OverAll" => ConflictAction::OverwriteAll,
+            "SkipAll" => ConflictAction::SkipAll,
+            "NewerAll" => ConflictAction::OverwriteIfNewerAll,
+            "Cancel" => ConflictAction::Cancel,
+            _ => return None,
+        })
+    }
+
+    fn suggest_renamed_destination(&self, destination: &Path) -> Result<PathBuf> {
+        let parent = destination.parent().ok_or_else(|| {
+            anyhow::anyhow!(
+                "destination has no parent for rename fallback: {}",
+                destination.display()
+            )
+        })?;
+        let file_name = destination
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .ok_or_else(|| anyhow::anyhow!("destination has no file name"))?;
+        let (stem, ext) = split_name_and_extension(file_name.as_str());
+        let backend = backend_from_spec(self.inactive_backend_spec());
+
+        for idx in 1..=10_000usize {
+            let candidate_name = if ext.is_empty() {
+                format!("{stem}_copy{idx}")
+            } else {
+                format!("{stem}_copy{idx}.{ext}")
+            };
+            let candidate = parent.join(candidate_name);
+            if backend.stat_entry(candidate.as_path()).is_err() {
+                return Ok(candidate);
             }
         }
 
-        self.push_log(format!(
-            "batch {} queued: {} item(s)",
-            operation_name(kind),
-            total
-        ));
-        Ok(true)
+        Err(anyhow::anyhow!(
+            "cannot allocate unique conflict rename near {}",
+            destination.display()
+        ))
+    }
+
+    fn should_overwrite_if_newer(&self, source: &Path, destination: &Path) -> Result<bool> {
+        let source_entry = self.active_backend().stat_entry(source)?;
+        let destination_entry = self.inactive_backend().stat_entry(destination)?;
+        if let Some(ordering) =
+            compare_mtime(source_entry.modified_at, destination_entry.modified_at)
+        {
+            return Ok(ordering == std::cmp::Ordering::Greater);
+        }
+        Ok(source_entry.size_bytes > destination_entry.size_bytes)
     }
 
     fn sync_visible_batch_progress(&mut self, preferred_batch_id: Option<u64>) {
@@ -1393,8 +1778,8 @@ impl App {
         self.state.dialog.as_ref()?;
 
         if let Some(accel) = accelerator_from_key(key) {
-            if let Some(role) = self.find_dialog_button_by_accelerator(accel) {
-                return Some(self.activate_dialog_button(role));
+            if let Some(button_idx) = self.find_dialog_button_by_accelerator(accel) {
+                return Some(self.activate_dialog_button(button_idx));
             }
         }
 
@@ -1413,14 +1798,13 @@ impl App {
                 Some(true)
             }
             KeyCode::Enter => {
-                let role = self
+                let button_idx = self
                     .state
                     .dialog
                     .as_ref()
-                    .and_then(DialogState::focused_button)
-                    .map(|button| button.role)
-                    .unwrap_or(DialogButtonRole::Primary);
-                Some(self.activate_dialog_button(role))
+                    .map(|dialog| dialog.focused_button)
+                    .unwrap_or(0);
+                Some(self.activate_dialog_button(button_idx))
             }
             KeyCode::Backspace => Some(self.edit_dialog_input_backspace()),
             KeyCode::Char(c)
@@ -1432,7 +1816,12 @@ impl App {
         }
     }
 
-    fn activate_dialog_button(&mut self, role: DialogButtonRole) -> bool {
+    fn activate_dialog_button(&mut self, button_idx: usize) -> bool {
+        if self.pending_conflict.is_some() {
+            return self.apply_conflict_dialog_action(button_idx);
+        }
+
+        let role = self.dialog_button_role(button_idx);
         if self.pending_confirmation.is_some() {
             return if role == DialogButtonRole::Primary {
                 self.apply_confirmation()
@@ -1482,6 +1871,13 @@ impl App {
     }
 
     fn cancel_dialog(&mut self) -> bool {
+        if self.pending_conflict.is_some() {
+            self.pending_conflict = None;
+            self.state.dialog = None;
+            self.push_log("conflict resolution canceled");
+            return true;
+        }
+
         if self.pending_confirmation.is_some() {
             self.pending_confirmation = None;
             self.state.dialog = None;
@@ -1512,6 +1908,15 @@ impl App {
 
         self.state.dialog = None;
         true
+    }
+
+    fn dialog_button_role(&self, button_idx: usize) -> DialogButtonRole {
+        self.state
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.buttons.get(button_idx))
+            .map(|button| button.role)
+            .unwrap_or(DialogButtonRole::Secondary)
     }
 
     fn apply_confirmation(&mut self) -> bool {
@@ -1571,23 +1976,14 @@ impl App {
         }
 
         let destination = pending.destination_dir.join(&requested_name);
-        let verb = if pending.kind == JobKind::Copy {
-            "copy queued"
-        } else {
-            "move queued"
-        };
-        let message = if requested_name == pending.source_name {
-            format!("{verb}: {}", pending.source_name)
-        } else {
-            format!("{verb}: {} -> {}", pending.source_name, requested_name)
+        let item = BatchOpItem {
+            source: pending.source_path,
+            destination: Some(destination),
+            name: pending.source_name,
+            overwrite_destination: false,
         };
 
-        match self.enqueue_job(
-            pending.kind,
-            pending.source_path,
-            Some(destination),
-            message,
-        ) {
+        match self.start_conflict_resolution(pending.kind, None, vec![item]) {
             Ok(redraw) => redraw,
             Err(err) => {
                 self.show_alert(err.to_string());
@@ -1841,16 +2237,12 @@ impl App {
         false
     }
 
-    fn find_dialog_button_by_accelerator(&self, accelerator: char) -> Option<DialogButtonRole> {
+    fn find_dialog_button_by_accelerator(&self, accelerator: char) -> Option<usize> {
         let normalized = accelerator.to_ascii_lowercase();
         self.state.dialog.as_ref().and_then(|dialog| {
-            dialog
-                .buttons
-                .iter()
-                .find(|button| {
-                    button.accelerator.map(|c| c.to_ascii_lowercase()) == Some(normalized)
-                })
-                .map(|button| button.role)
+            dialog.buttons.iter().position(|button| {
+                button.accelerator.map(|c| c.to_ascii_lowercase()) == Some(normalized)
+            })
         })
     }
 
@@ -2397,6 +2789,7 @@ impl App {
         self.pending_rename = None;
         self.pending_mask = None;
         self.pending_sftp_connect = None;
+        self.pending_conflict = None;
         self.state.dialog = Some(alert_dialog(message.clone()));
         self.push_log(message);
     }
@@ -2772,6 +3165,55 @@ fn format_bytes(bytes: u64) -> String {
     }
 }
 
+fn compare_mtime(
+    source: Option<std::time::SystemTime>,
+    destination: Option<std::time::SystemTime>,
+) -> Option<std::cmp::Ordering> {
+    match (source, destination) {
+        (Some(src), Some(dst)) => Some(src.cmp(&dst)),
+        _ => None,
+    }
+}
+
+fn format_mtime_hint(value: Option<std::time::SystemTime>) -> String {
+    match value {
+        Some(ts) => format!("{ts:?}"),
+        None => "-".to_string(),
+    }
+}
+
+fn split_name_and_extension(name: &str) -> (String, String) {
+    match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), ext.to_string()),
+        _ => (name.to_string(), String::new()),
+    }
+}
+
+fn copy_move_item_message(kind: JobKind, item: &BatchOpItem) -> String {
+    let destination = item
+        .destination
+        .as_ref()
+        .map(|path| source_item_label(path.as_path()))
+        .unwrap_or_else(|| "-".to_string());
+    if item.overwrite_destination {
+        format!(
+            "{} queued (overwrite): {} -> {}",
+            operation_name(kind),
+            item.name,
+            destination
+        )
+    } else if destination != item.name {
+        format!(
+            "{} queued: {} -> {}",
+            operation_name(kind),
+            item.name,
+            destination
+        )
+    } else {
+        format!("{} queued: {}", operation_name(kind), item.name)
+    }
+}
+
 fn accelerator_from_key(key: &KeyEvent) -> Option<char> {
     if !key.modifiers.contains(KeyModifiers::ALT) {
         return None;
@@ -2879,6 +3321,59 @@ fn confirm_dialog(body: String) -> DialogState {
             },
         ],
         focused_button: 1,
+        tone: DialogTone::Warning,
+    }
+}
+
+fn conflict_dialog(title: String, body: String) -> DialogState {
+    DialogState {
+        title,
+        body,
+        input_value: None,
+        mask_input: false,
+        buttons: vec![
+            DialogButton {
+                label: "Overwrite".to_string(),
+                accelerator: Some('o'),
+                role: DialogButtonRole::Primary,
+            },
+            DialogButton {
+                label: "Skip".to_string(),
+                accelerator: Some('s'),
+                role: DialogButtonRole::Secondary,
+            },
+            DialogButton {
+                label: "Rename".to_string(),
+                accelerator: Some('r'),
+                role: DialogButtonRole::Secondary,
+            },
+            DialogButton {
+                label: "Newer".to_string(),
+                accelerator: Some('n'),
+                role: DialogButtonRole::Primary,
+            },
+            DialogButton {
+                label: "OverAll".to_string(),
+                accelerator: Some('w'),
+                role: DialogButtonRole::Primary,
+            },
+            DialogButton {
+                label: "SkipAll".to_string(),
+                accelerator: Some('k'),
+                role: DialogButtonRole::Secondary,
+            },
+            DialogButton {
+                label: "NewerAll".to_string(),
+                accelerator: Some('a'),
+                role: DialogButtonRole::Primary,
+            },
+            DialogButton {
+                label: "Cancel".to_string(),
+                accelerator: Some('c'),
+                role: DialogButtonRole::Secondary,
+            },
+        ],
+        focused_button: 0,
         tone: DialogTone::Warning,
     }
 }

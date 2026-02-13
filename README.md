@@ -12,6 +12,7 @@ Implemented:
 - file operations (`copy`, `move`, `delete`, `mkdir`) via background jobs
 - MC-like multi-select (`Space/Ins`, range selection, select/deselect by mask, invert)
 - batch `F5/F6/F8` over selected items with preflight checks and summary confirm
+- interactive conflict matrix for `copy/move` (`overwrite/skip/rename/newer` + `apply to all`)
 - incremental search (`/`) per panel
 - per-panel sorting (`F2`)
 - stable table layout (`Name | Size | Modified`) with narrow-width fallback
@@ -69,6 +70,7 @@ Dialog controls:
 - `Enter`: activate focused button
 - `Esc`: cancel/close dialog
 - `Alt+<letter>`: button accelerator (`Alt+Y`, `Alt+N`, `Alt+A`, `Alt+C`, ...)
+- conflict dialog: `Alt+O` overwrite, `Alt+S` skip, `Alt+R` rename, `Alt+N` newer, `Alt+W/K/A` for `*All`, `Alt+C` cancel
 
 Viewer controls:
 - `Up/Down`: scroll line-by-line
@@ -93,7 +95,7 @@ Remote workflow:
 - worker pool: background execution for long-running filesystem operations
 - filesystem adapter: path normalization, listing, sorting, conflict handling
 - backend abstraction: `LocalFs` + `SftpFs` (`ssh2`)
-- conflict strategy: `copy/move` abort when destination already exists
+- conflict strategy: interactive matrix with per-item or global policy (`overwrite/skip/rename/newer`)
 
 Security notes:
 - `auth=password` from the dialog keeps password in process memory; prefer `auth=agent` or key-based auth
@@ -104,7 +106,6 @@ Security notes:
 
 - POSIX-first (`macOS`, `Linux`) for v1
 - delete is permanent (no Trash integration)
-- overwrite flow is not implemented; conflicts are aborted explicitly
 - command line shell execution is available only on local backend
 - viewer preview reads up to `256 KB` per file in v1
 - `F4` requires `$EDITOR` to be set in environment
@@ -117,7 +118,6 @@ Security notes:
 - viewer text rendering truncates very long lines (`512` chars) for stable TUI layout
 - dialog mode uses keyboard-first interaction only (no mouse support)
 - there is no internal editor yet (external `$EDITOR` only)
-- there is no interactive conflict resolution matrix (`overwrite/rename/skip`) yet
 - viewer/editor currently operate on local files only (SFTP preview/edit not yet wired)
 - SFTP smoke integration requires explicit test host env (not auto-run by default)
 
@@ -127,7 +127,6 @@ Security notes:
 - search in viewer
 - internal editor mode
 - tabs/bookmarks/favorites
-- overwrite/rename/skip conflict resolution dialog
 - archive operations (zip/tar)
 - optional Trash mode for safer delete behavior
 - configurable keymap

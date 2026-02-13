@@ -291,10 +291,10 @@ MVP-функции (итерация 1):
 [x] Реализовать клавиатурную навигацию меню (`F9/Alt+буква`, стрелки, Enter, Esc) без регрессий в основном режиме.
 
 ## Step 29: Матрица конфликтов copy/move
-[] Добавить интерактивный conflict-dialog: `Overwrite`, `Skip`, `Rename` + `Apply to all`.
-[] Поддержать стратегии `newer-only` и `size/mtime`-подсказки в теле диалога.
-[] Интегрировать conflict-policy в batch pipeline и прогресс (`N/M`, failed/skipped).
-[] Обновить обработку ошибок и activity log для прозрачного post-mortem.
+[x] Добавить интерактивный conflict-dialog: `Overwrite`, `Skip`, `Rename` + `Apply to all`.
+[x] Поддержать стратегии `newer-only` и `size/mtime`-подсказки в теле диалога.
+[x] Интегрировать conflict-policy в batch pipeline и прогресс (`N/M`, failed/skipped).
+[x] Обновить обработку ошибок и activity log для прозрачного post-mortem.
 
 ## Step 30: Архивы как VFS (zip/tar/tar.gz)
 [] Ввести `ArchiveFs` backend и подключение как panel-mode поверх существующей `FsBackend` абстракции.
