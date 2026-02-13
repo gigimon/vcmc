@@ -321,7 +321,7 @@ MVP-функции (итерация 1):
 [x] Добавить пункт в верхнее меню для смены редактора без перезапуска.
 
 ## Step 34: Полировка итерации 5
-[] Добавить smoke-сценарии: conflict-matrix, archive VFS browse/copy out, `fd` find, viewer search/hex, editor chooser.
+[x] Добавить smoke-сценарии: conflict-matrix, archive VFS browse/copy out, `fd` find, viewer search/hex, editor chooser.
 [x] Обновить README: верхнее меню, новый find-flow, conflict policies, archive VFS, editor setup.
 [x] Добавить Known constraints для `fd`/archive edge-cases и remote viewer limits.
 [x] Сформировать backlog итерации 6 (internal editor, sync dir compare, plugin hooks).
@@ -350,10 +350,10 @@ MVP-функции (итерация 1):
 # Implementation (итерация 6)
 
 ## Step 35: Поиск по содержимому (content search)
-[] Добавить поиск по содержимому на базе `rg` (`pattern`, optional `glob`, `case`, `hidden`).
-[] Реализовать асинхронный запуск `rg` с live-прогрессом и отменой.
-[] Показать результаты в panelized view: `file:line:snippet` с переходом в файл/директорию.
-[] Добавить fallback-диалог, если `rg` отсутствует в системе.
+[x] Добавить поиск по содержимому на базе `rg` (`pattern`, optional `glob`, `case`, `hidden`).
+[x] Реализовать асинхронный запуск `rg` с live-прогрессом и отменой.
+[x] Показать результаты в panelized view: `file:line:snippet` с переходом в файл/директорию.
+[x] Добавить fallback-диалог, если `rg` отсутствует в системе.
 
 ## Step 36: SFTP bookmarks
 [] Добавить модель bookmark для SFTP (name/host/port/user/path/auth mode).
@@ -368,6 +368,6 @@ MVP-функции (итерация 1):
 [] Обновить статус/log с подробными результатами и ошибками (`permission denied`, `unsupported`, и т.д.).
 
 # Definition of Done (итерация 6)
-[] Поиск по содержимому через `rg` работает стабильно и выдает panelized results с быстрым переходом.
+[x] Поиск по содержимому через `rg` работает стабильно и выдает panelized results с быстрым переходом.
 [] Пользователь может сохранять и использовать SFTP bookmarks для повторных подключений.
 [] Визуальный редактор прав/атрибутов позволяет безопасно изменять метаданные без ручного shell.

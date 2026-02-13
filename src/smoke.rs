@@ -1,20 +1,29 @@
 use std::env;
 use std::fs::{self, File};
-use std::io::Write;
+use std::io::{Cursor, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Result, bail};
 use crossbeam_channel::{Receiver, unbounded};
+use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use tar::{Builder as TarBuilder, EntryType, Header as TarHeader};
 
+use crate::app::App;
 use crate::backend::backend_from_spec;
+use crate::find::{is_fd_available, spawn_fd_search};
 use crate::fs::FsAdapter;
 use crate::jobs::WorkerPool;
 use crate::model::{
-    BackendSpec, Event, JobKind, JobRequest, JobStatus, SftpAuth, SftpConnectionInfo, SortMode,
+    AppState, ArchiveConnectionInfo, BackendSpec, Event, FindKind, FindRequest, FindUpdate,
+    JobKind, JobRequest, JobStatus, PanelId, PanelState, SftpAuth, SftpConnectionInfo, SortMode,
+    ViewerMode,
 };
-use crate::viewer::load_viewer_state;
+use crate::viewer::{
+    jump_to_next_match, load_viewer_state, load_viewer_state_from_preview, refresh_viewer_search,
+    set_viewer_mode,
+};
 
 pub struct SmokeReport {
     pub temp_root: PathBuf,
@@ -31,6 +40,13 @@ pub struct SmokeReport {
     pub viewer_text_mode_ok: bool,
     pub viewer_binary_mode_ok: bool,
     pub viewer_scroll_probe_ok: bool,
+    pub conflict_matrix_ok: bool,
+    pub archive_vfs_browse_ok: bool,
+    pub archive_vfs_copy_out_ok: bool,
+    pub fd_find_enabled: bool,
+    pub fd_find_ok: bool,
+    pub viewer_search_hex_ok: bool,
+    pub editor_chooser_ok: bool,
     pub editor_roundtrip_ms: f64,
     pub sftp_smoke_enabled: bool,
     pub sftp_smoke_ok: bool,
@@ -56,6 +72,13 @@ impl SmokeReport {
                 "viewer_text_mode_ok: {}\n",
                 "viewer_binary_mode_ok: {}\n",
                 "viewer_scroll_probe_ok: {}\n",
+                "conflict_matrix_ok: {}\n",
+                "archive_vfs_browse_ok: {}\n",
+                "archive_vfs_copy_out_ok: {}\n",
+                "fd_find_enabled: {}\n",
+                "fd_find_ok: {}\n",
+                "viewer_search_hex_ok: {}\n",
+                "editor_chooser_ok: {}\n",
                 "editor_roundtrip_ms: {:.2}\n",
                 "sftp_smoke_enabled: {}\n",
                 "sftp_smoke_ok: {}\n",
@@ -75,6 +98,13 @@ impl SmokeReport {
             self.viewer_text_mode_ok,
             self.viewer_binary_mode_ok,
             self.viewer_scroll_probe_ok,
+            self.conflict_matrix_ok,
+            self.archive_vfs_browse_ok,
+            self.archive_vfs_copy_out_ok,
+            self.fd_find_enabled,
+            self.fd_find_ok,
+            self.viewer_search_hex_ok,
+            self.editor_chooser_ok,
             self.editor_roundtrip_ms,
             self.sftp_smoke_enabled,
             self.sftp_smoke_ok,
@@ -318,6 +348,12 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
         bail!("viewer scroll probe failed for text sample");
     }
 
+    let conflict_matrix_ok = run_conflict_matrix_probe(temp_root)?;
+    let (archive_vfs_browse_ok, archive_vfs_copy_out_ok) = run_archive_vfs_probe(temp_root)?;
+    let (fd_find_enabled, fd_find_ok) = run_fd_find_probe(temp_root)?;
+    let viewer_search_hex_ok = run_viewer_search_hex_probe()?;
+    let editor_chooser_ok = run_editor_chooser_probe(temp_root)?;
+
     let editor_roundtrip_start = Instant::now();
     run_editor_roundtrip_probe(&workload.viewer_text_file)?;
     let editor_roundtrip_ms = editor_roundtrip_start.elapsed().as_secs_f64() * 1_000.0;
@@ -339,6 +375,13 @@ fn run_smoke_inner(temp_root: &Path) -> Result<SmokeReport> {
         viewer_text_mode_ok,
         viewer_binary_mode_ok,
         viewer_scroll_probe_ok,
+        conflict_matrix_ok,
+        archive_vfs_browse_ok,
+        archive_vfs_copy_out_ok,
+        fd_find_enabled,
+        fd_find_ok,
+        viewer_search_hex_ok,
+        editor_chooser_ok,
         editor_roundtrip_ms,
         sftp_smoke_enabled,
         sftp_smoke_ok,
@@ -465,6 +508,397 @@ fn create_viewer_binary_file(path: &Path) -> Result<()> {
     bytes[128] = 0;
     file.write_all(&bytes)?;
     Ok(())
+}
+
+fn create_text_file(path: &Path, content: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, content.as_bytes())?;
+    Ok(())
+}
+
+fn run_conflict_matrix_probe(temp_root: &Path) -> Result<bool> {
+    let conflict_root = temp_root.join("step34_conflict");
+    let left_dir = conflict_root.join("left_src");
+    let right_dir = conflict_root.join("right_dst");
+    fs::create_dir_all(&left_dir)?;
+    fs::create_dir_all(&right_dir)?;
+
+    create_text_file(&left_dir.join("alpha.txt"), "alpha-new\n")?;
+    create_text_file(&left_dir.join("beta.txt"), "beta-new\n")?;
+    create_text_file(&right_dir.join("alpha.txt"), "alpha-old\n")?;
+    create_text_file(&right_dir.join("beta.txt"), "beta-old\n")?;
+
+    let (event_tx, event_rx) = unbounded();
+    let mut app = App::bootstrap(conflict_root.clone(), event_tx)?;
+
+    move_active_selection_to(&mut app, "left_src")?;
+    press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    press_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    move_active_selection_to(&mut app, "right_dst")?;
+    press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    press_key(&mut app, KeyCode::Tab, KeyModifiers::NONE);
+    move_active_selection_to(&mut app, "alpha.txt")?;
+    press_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+    move_active_selection_to(&mut app, "beta.txt")?;
+    press_key(&mut app, KeyCode::Char(' '), KeyModifiers::NONE);
+
+    press_key(&mut app, KeyCode::F(5), KeyModifiers::NONE);
+    let confirm_title = app
+        .state()
+        .dialog
+        .as_ref()
+        .map(|dialog| dialog.title.as_str())
+        .unwrap_or_default();
+    if confirm_title != "Confirm" {
+        bail!("conflict probe expected confirm dialog, got '{confirm_title}'");
+    }
+    press_key(&mut app, KeyCode::Char('y'), KeyModifiers::ALT);
+
+    let mut saw_conflict = false;
+    let mut used_rename = false;
+    let mut used_skip = false;
+    for _ in 0..8 {
+        let Some(dialog) = app.state().dialog.clone() else {
+            break;
+        };
+        if !dialog.title.starts_with("Conflict ") {
+            break;
+        }
+        saw_conflict = true;
+        if !used_rename {
+            press_key(&mut app, KeyCode::Char('r'), KeyModifiers::ALT);
+            used_rename = true;
+        } else {
+            press_key(&mut app, KeyCode::Char('s'), KeyModifiers::ALT);
+            used_skip = true;
+        }
+    }
+    if !saw_conflict || !used_rename || !used_skip {
+        bail!("conflict probe did not exercise rename+skip matrix actions");
+    }
+
+    wait_for_app_jobs(
+        &mut app,
+        &event_rx,
+        Duration::from_secs(20),
+        "conflict-probe",
+    )?;
+
+    let mut renamed_files = Vec::new();
+    for entry in fs::read_dir(&right_dir)? {
+        let path = entry?.path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.contains("_copy"))
+        {
+            renamed_files.push(path);
+        }
+    }
+    if renamed_files.len() != 1 {
+        bail!(
+            "conflict probe expected exactly one renamed file, got {}",
+            renamed_files.len()
+        );
+    }
+
+    let renamed_content = fs::read_to_string(&renamed_files[0])?;
+    if renamed_content != "alpha-new\n" && renamed_content != "beta-new\n" {
+        bail!(
+            "conflict probe unexpected renamed payload in {}",
+            renamed_files[0].display()
+        );
+    }
+
+    let alpha_base = fs::read_to_string(right_dir.join("alpha.txt"))?;
+    let beta_base = fs::read_to_string(right_dir.join("beta.txt"))?;
+    if alpha_base != "alpha-old\n" || beta_base != "beta-old\n" {
+        bail!("conflict probe expected original conflict targets to stay untouched");
+    }
+
+    Ok(true)
+}
+
+fn run_archive_vfs_probe(temp_root: &Path) -> Result<(bool, bool)> {
+    let archive_root = temp_root.join("step34_archive");
+    let archive_path = archive_root.join("bundle.tar");
+    let out_dir = archive_root.join("out");
+    fs::create_dir_all(&out_dir)?;
+
+    let archive_payload = "archive-step34\n";
+    create_tar_archive_with_member(&archive_path, "docs/readme.txt", archive_payload.as_bytes())?;
+
+    let archive_spec = BackendSpec::Archive(ArchiveConnectionInfo {
+        archive_path: archive_path.clone(),
+    });
+    let archive_backend = backend_from_spec(&archive_spec);
+
+    let root_entries = archive_backend.list_dir(Path::new("/"), SortMode::Name, true)?;
+    if !root_entries.iter().any(|entry| entry.name == "docs") {
+        bail!("archive probe expected '/docs' in archive root listing");
+    }
+    let docs_entries = archive_backend.list_dir(Path::new("/docs"), SortMode::Name, true)?;
+    if !docs_entries.iter().any(|entry| entry.name == "readme.txt") {
+        bail!("archive probe expected '/docs/readme.txt' in archive listing");
+    }
+    let browse_ok = true;
+
+    let (event_tx, event_rx) = unbounded();
+    let worker_pool = WorkerPool::new(1, event_tx);
+    let copy_out_target = out_dir.join("readme.out.txt");
+    worker_pool.submit(JobRequest {
+        id: 61_000,
+        batch_id: None,
+        kind: JobKind::Copy,
+        source_backend: archive_spec,
+        destination_backend: Some(BackendSpec::Local),
+        source: PathBuf::from("/docs/readme.txt"),
+        destination: Some(copy_out_target.clone()),
+    })?;
+    wait_for_terminal_updates(
+        &event_rx,
+        &[61_000],
+        Duration::from_secs(20),
+        "archive-copy-out",
+    )?;
+
+    let copied = fs::read_to_string(copy_out_target)?;
+    if copied != archive_payload {
+        bail!("archive copy-out payload mismatch");
+    }
+
+    Ok((browse_ok, true))
+}
+
+fn run_fd_find_probe(temp_root: &Path) -> Result<(bool, bool)> {
+    if !is_fd_available() {
+        return Ok((false, true));
+    }
+
+    let find_root = temp_root.join("step34_find");
+    fs::create_dir_all(find_root.join("nested"))?;
+    create_text_file(&find_root.join("alpha_needle_smoke.txt"), "x\n")?;
+    create_text_file(&find_root.join("nested/needle_smoke.log"), "y\n")?;
+    create_text_file(&find_root.join("nested/other.txt"), "z\n")?;
+
+    let expected_a = fs::canonicalize(find_root.join("alpha_needle_smoke.txt"))?;
+    let expected_b = fs::canonicalize(find_root.join("nested/needle_smoke.log"))?;
+
+    let (event_tx, event_rx) = unbounded();
+    spawn_fd_search(
+        FindRequest {
+            id: 71_000,
+            panel_id: PanelId::Left,
+            kind: FindKind::NameFd,
+            root: find_root,
+            query: "needle_smoke".to_string(),
+            glob: false,
+            glob_pattern: None,
+            hidden: false,
+            follow_symlinks: false,
+            case_sensitive: false,
+        },
+        event_tx,
+    );
+
+    let start = Instant::now();
+    loop {
+        if start.elapsed() > Duration::from_secs(20) {
+            bail!("fd find probe timed out");
+        }
+
+        match event_rx.recv_timeout(Duration::from_millis(20)) {
+            Ok(Event::Find(update)) => match update {
+                FindUpdate::Progress { .. } => {}
+                FindUpdate::Done { entries, .. } => {
+                    let found: std::collections::HashSet<PathBuf> =
+                        entries.into_iter().map(|entry| entry.path).collect();
+                    if !found.contains(&expected_a) || !found.contains(&expected_b) {
+                        bail!("fd find probe did not return expected matches");
+                    }
+                    return Ok((true, true));
+                }
+                FindUpdate::Failed { error, .. } => {
+                    bail!("fd find probe failed: {error}");
+                }
+                FindUpdate::Canceled { .. } => {
+                    bail!("fd find probe unexpectedly canceled");
+                }
+            },
+            Ok(_) => {}
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(err) => bail!("fd find probe receive failed: {err}"),
+        }
+    }
+}
+
+fn run_viewer_search_hex_probe() -> Result<bool> {
+    let bytes = b"alpha needle\nbeta marker\nneedle gamma\n".to_vec();
+    let mut state = load_viewer_state_from_preview(
+        PathBuf::from("/tmp/viewer-search-step34.txt"),
+        "viewer-search-step34.txt".to_string(),
+        bytes.len() as u64,
+        bytes,
+        false,
+    );
+    if state.mode != ViewerMode::Text {
+        bail!("viewer search probe expected text mode by default");
+    }
+
+    state.search_query = "needle".to_string();
+    refresh_viewer_search(&mut state);
+    if state.search_matches.len() < 2 {
+        bail!("viewer search probe expected >=2 text matches");
+    }
+    let Some(before_next) = state.search_matches.get(state.search_match_index).copied() else {
+        bail!("viewer search probe has empty match index");
+    };
+    let Some(after_next) = jump_to_next_match(&mut state, true) else {
+        bail!("viewer search probe expected next match");
+    };
+    if before_next == after_next {
+        bail!("viewer search probe expected next match to move cursor");
+    }
+
+    set_viewer_mode(&mut state, ViewerMode::Hex);
+    if state.mode != ViewerMode::Hex {
+        bail!("viewer search probe failed to switch into hex mode");
+    }
+    state.search_query = "6E 65 65".to_string();
+    refresh_viewer_search(&mut state);
+    if state.search_matches.is_empty() {
+        bail!("viewer search probe expected matches in hex mode");
+    }
+
+    Ok(true)
+}
+
+fn run_editor_chooser_probe(temp_root: &Path) -> Result<bool> {
+    let editor_root = temp_root.join("step34_editor");
+    fs::create_dir_all(&editor_root)?;
+    create_text_file(&editor_root.join("sample.txt"), "editor chooser probe\n")?;
+
+    let (event_tx, _event_rx) = unbounded();
+    let mut app = App::bootstrap(editor_root, event_tx)?;
+
+    press_key(&mut app, KeyCode::Char('o'), KeyModifiers::ALT);
+    for _ in 0..3 {
+        press_key(&mut app, KeyCode::Down, KeyModifiers::NONE);
+    }
+    press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+
+    let Some(dialog) = app.state().dialog.clone() else {
+        bail!("editor chooser probe expected dialog after Options -> Editor Settings");
+    };
+    if dialog.title == "Editor Setup" {
+        if !dialog.body.contains("Choose default editor") {
+            bail!("editor chooser probe missing chooser body text");
+        }
+        if !dialog
+            .body
+            .lines()
+            .any(|line| line.trim_start().starts_with("1: "))
+        {
+            bail!("editor chooser probe expected at least one candidate line");
+        }
+        press_key(&mut app, KeyCode::Esc, KeyModifiers::NONE);
+        return Ok(true);
+    }
+
+    if dialog.title == "Error"
+        && dialog
+            .body
+            .contains("No supported editors found in PATH (nvim/vim/nano/hx/micro/emacs/code)")
+    {
+        press_key(&mut app, KeyCode::Enter, KeyModifiers::NONE);
+        return Ok(true);
+    }
+
+    bail!(
+        "editor chooser probe got unexpected dialog: '{}' ({})",
+        dialog.title,
+        dialog.body
+    );
+}
+
+fn create_tar_archive_with_member(path: &Path, member: &str, bytes: &[u8]) -> Result<()> {
+    let file = File::create(path)?;
+    let mut builder = TarBuilder::new(file);
+    let mut header = TarHeader::new_gnu();
+    header.set_entry_type(EntryType::Regular);
+    header.set_mode(0o644);
+    header.set_size(bytes.len() as u64);
+    header.set_cksum();
+    builder.append_data(&mut header, member, Cursor::new(bytes))?;
+    builder.finish()?;
+    Ok(())
+}
+
+fn press_key(app: &mut App, code: KeyCode, modifiers: KeyModifiers) {
+    let key = KeyEvent::new(code, modifiers);
+    let _ = app.on_event(Event::Input(key));
+}
+
+fn move_active_selection_to(app: &mut App, entry_name: &str) -> Result<()> {
+    let target_index = active_panel_state(app.state())
+        .entries
+        .iter()
+        .position(|entry| entry.name == entry_name)
+        .ok_or_else(|| anyhow::anyhow!("entry '{entry_name}' not found in active panel"))?;
+
+    loop {
+        let current_index = active_panel_state(app.state()).selected_index;
+        if current_index == target_index {
+            break;
+        }
+        if current_index < target_index {
+            press_key(app, KeyCode::Down, KeyModifiers::NONE);
+        } else {
+            press_key(app, KeyCode::Up, KeyModifiers::NONE);
+        }
+    }
+    Ok(())
+}
+
+fn active_panel_state(state: &AppState) -> &PanelState {
+    match state.active_panel {
+        PanelId::Left => &state.left_panel,
+        PanelId::Right => &state.right_panel,
+    }
+}
+
+fn wait_for_app_jobs(
+    app: &mut App,
+    event_rx: &Receiver<Event>,
+    timeout: Duration,
+    scope: &str,
+) -> Result<()> {
+    let started = Instant::now();
+    loop {
+        let has_active = app
+            .state()
+            .jobs
+            .iter()
+            .any(|job| matches!(job.status, JobStatus::Queued | JobStatus::Running));
+        if !has_active {
+            return Ok(());
+        }
+        if started.elapsed() > timeout {
+            bail!("{scope} timed out while waiting for app jobs");
+        }
+
+        match event_rx.recv_timeout(Duration::from_millis(25)) {
+            Ok(event) => {
+                let _ = app.on_event(event);
+            }
+            Err(crossbeam_channel::RecvTimeoutError::Timeout) => {}
+            Err(err) => bail!("{scope} failed receiving app event: {err}"),
+        }
+    }
 }
 
 fn make_temp_root() -> PathBuf {

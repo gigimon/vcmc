@@ -13,12 +13,15 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ssh2::Session;
 
 use crate::backend::{FsBackend, backend_from_spec, is_archive_file_path};
-use crate::find::{is_fd_available, parse_find_input, spawn_fd_search};
+use crate::find::{
+    cancel_running_find, is_fd_available, is_rg_available, parse_content_search_input,
+    parse_find_input, spawn_fd_search, spawn_rg_search,
+};
 use crate::jobs::WorkerPool;
 use crate::menu::{MenuAction, menu_group_index_by_hotkey, top_menu_groups};
 use crate::model::{
     AppState, ArchiveConnectionInfo, BackendSpec, BatchProgressState, Command, DialogButton,
-    DialogButtonRole, DialogState, DialogTone, Event, FindPanelState, FindProgressState,
+    DialogButtonRole, DialogState, DialogTone, Event, FindKind, FindPanelState, FindProgressState,
     FindRequest, FindUpdate, FsEntry, FsEntryType, Job, JobKind, JobRequest, JobStatus, JobUpdate,
     PanelId, ScreenMode, SftpAuth, SftpConnectionInfo, SortMode, TerminalSize, ViewerMode,
     ViewerState,
@@ -89,8 +92,10 @@ struct PendingSftpConnect {
 
 struct PendingFind {
     panel_id: PanelId,
+    kind: FindKind,
     root: PathBuf,
     default_hidden: bool,
+    default_case_sensitive: bool,
 }
 
 struct PendingEditorChoice {
@@ -271,6 +276,10 @@ impl App {
                 }
 
                 if let Some(redraw) = self.handle_command_line_input(&key) {
+                    return redraw;
+                }
+
+                if let Some(redraw) = self.handle_find_cancel_input(&key) {
                     return redraw;
                 }
 
@@ -458,6 +467,7 @@ impl App {
             FindUpdate::Progress {
                 id,
                 panel_id,
+                kind,
                 query,
                 matches,
             } => {
@@ -466,21 +476,29 @@ impl App {
                 }
                 self.state.find_progress = Some(FindProgressState {
                     panel_id,
+                    kind,
                     query,
                     matches,
                     running: true,
                 });
-                self.state.status_line = format!("find running: {} match(es)", matches);
+                self.state.status_line = format!(
+                    "{} running: {} match(es) (Esc to cancel)",
+                    find_kind_title(kind),
+                    matches
+                );
                 true
             }
             FindUpdate::Done {
                 id,
                 panel_id,
+                kind,
                 query,
                 root,
                 glob,
+                glob_pattern,
                 hidden,
                 follow_symlinks,
+                case_sensitive,
                 entries,
             } => {
                 if self.active_find_id(panel_id) != Some(id) {
@@ -489,29 +507,48 @@ impl App {
                 self.set_active_find_id(panel_id, None);
                 self.state.find_progress = Some(FindProgressState {
                     panel_id,
+                    kind,
                     query: query.clone(),
                     matches: entries.len(),
                     running: false,
                 });
                 match self.apply_find_results(
                     panel_id,
+                    kind,
                     root,
                     query,
                     glob,
+                    glob_pattern,
                     hidden,
                     follow_symlinks,
+                    case_sensitive,
                     entries,
                 ) {
                     Ok(redraw) => redraw,
                     Err(err) => {
-                        self.show_alert(format!("find failed: {err}"));
+                        self.show_alert(format!("{} failed: {err}", find_kind_title(kind)));
                         true
                     }
                 }
             }
+            FindUpdate::Canceled {
+                id,
+                panel_id,
+                kind,
+                query,
+            } => {
+                if self.active_find_id(panel_id) != Some(id) {
+                    return false;
+                }
+                self.set_active_find_id(panel_id, None);
+                self.state.find_progress = None;
+                self.push_log(format!("{} canceled: '{}'", find_kind_title(kind), query));
+                true
+            }
             FindUpdate::Failed {
                 id,
                 panel_id,
+                kind,
                 query,
                 error,
             } => {
@@ -520,7 +557,11 @@ impl App {
                 }
                 self.set_active_find_id(panel_id, None);
                 self.state.find_progress = None;
-                self.show_alert(format!("find '{query}' failed: {error}"));
+                self.show_alert(format!(
+                    "{} '{}' failed: {error}",
+                    find_kind_title(kind),
+                    query
+                ));
                 true
             }
         }
@@ -754,9 +795,10 @@ impl App {
             panel.apply_search_filter();
             panel.error_message = None;
             if update_status {
-                let mode = if find_view.glob { "glob" } else { "name" };
+                let mode = find_view_mode_suffix(&find_view);
                 self.state.status_line = format!(
-                    "Find view ({mode}): '{}' @ {}",
+                    "{} view ({mode}): '{}' @ {}",
+                    find_kind_title(find_view.kind),
                     find_view.query,
                     find_view.root.display()
                 );
@@ -1266,7 +1308,7 @@ impl App {
     fn start_find_fd_prompt(&mut self) -> Result<bool> {
         let panel_id = self.state.active_panel;
         if !matches!(self.backend_spec(panel_id), BackendSpec::Local) {
-            self.show_alert("Find via fd is available for local panel only");
+            self.show_alert("Search files is available for local panel only");
             return Ok(true);
         }
 
@@ -1285,16 +1327,56 @@ impl App {
         let default_hidden = self.panel(panel_id).show_hidden;
         self.pending_find = Some(PendingFind {
             panel_id,
+            kind: FindKind::NameFd,
             root: self.panel(panel_id).cwd.clone(),
             default_hidden,
+            default_case_sensitive: false,
         });
         self.state.dialog = Some(input_dialog(
-            "Find (fd)",
+            "Search files",
             "Pattern [--glob] [--hidden] [--follow]",
             String::new(),
             DialogTone::Default,
         ));
-        self.state.status_line = "find: enter pattern and optional fd flags".to_string();
+        self.state.status_line = "search files: enter pattern and optional fd flags".to_string();
+        Ok(true)
+    }
+
+    fn start_find_rg_prompt(&mut self) -> Result<bool> {
+        let panel_id = self.state.active_panel;
+        if !matches!(self.backend_spec(panel_id), BackendSpec::Local) {
+            self.show_alert("Content search via rg is available for local panel only");
+            return Ok(true);
+        }
+        if !is_rg_available() {
+            self.show_alert(
+                "rg is not installed. Install: brew install ripgrep or apt install ripgrep",
+            );
+            return Ok(true);
+        }
+
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.pending_sftp_connect = None;
+        self.pending_conflict = None;
+        self.pending_viewer_search = false;
+        let default_hidden = self.panel(panel_id).show_hidden;
+        self.pending_find = Some(PendingFind {
+            panel_id,
+            kind: FindKind::ContentRg,
+            root: self.panel(panel_id).cwd.clone(),
+            default_hidden,
+            default_case_sensitive: false,
+        });
+        self.state.dialog = Some(input_dialog(
+            "Search text",
+            "Pattern [--glob GLOB] [--hidden] [--case-sensitive|--ignore-case]",
+            String::new(),
+            DialogTone::Default,
+        ));
+        self.state.status_line = "search text: enter pattern and optional rg flags".to_string();
         Ok(true)
     }
 
@@ -2073,11 +2155,14 @@ impl App {
     fn apply_find_results(
         &mut self,
         panel_id: PanelId,
+        kind: FindKind,
         root: PathBuf,
         query: String,
         glob: bool,
+        glob_pattern: Option<String>,
         hidden: bool,
         follow_symlinks: bool,
+        case_sensitive: bool,
         mut entries: Vec<FsEntry>,
     ) -> Result<bool> {
         let sort_mode = self.panel(panel_id).sort_mode;
@@ -2091,11 +2176,14 @@ impl App {
             let panel = self.panel_mut(panel_id);
             panel.cwd = root.clone();
             panel.find_view = Some(FindPanelState {
+                kind,
                 root: root.clone(),
                 query: query.clone(),
                 glob,
+                glob_pattern,
                 hidden,
                 follow_symlinks,
+                case_sensitive,
             });
             panel.search_query.clear();
             panel.selected_paths.clear();
@@ -2105,9 +2193,14 @@ impl App {
             panel.error_message = None;
         }
         self.state.active_panel = panel_id;
-        self.state.status_line = format!("find done: '{}' => {matches} match(es)", query);
+        self.state.status_line = format!(
+            "{} done: '{}' => {matches} match(es)",
+            find_kind_title(kind),
+            query
+        );
         self.push_log(format!(
-            "find done [{}]: '{}' in {}",
+            "{} done [{}]: '{}' in {}",
+            find_kind_title(kind),
             panel_name(panel_id),
             query,
             root.display()
@@ -2773,47 +2866,85 @@ impl App {
             return true;
         }
 
-        let parsed = match parse_find_input(value.as_str(), pending.default_hidden) {
-            Ok(parsed) => parsed,
-            Err(err) => {
-                self.show_alert(format!("find parse error: {err}"));
-                return true;
+        let request = match pending.kind {
+            FindKind::NameFd => {
+                let parsed = match parse_find_input(value.as_str(), pending.default_hidden) {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        self.show_alert(format!("find parse error: {err}"));
+                        return true;
+                    }
+                };
+                if !is_fd_available() {
+                    self.show_alert(
+                        "fd is not installed. Install: brew install fd or apt install fd-find",
+                    );
+                    return true;
+                }
+                FindRequest {
+                    id: self.next_find_id,
+                    panel_id: pending.panel_id,
+                    kind: FindKind::NameFd,
+                    root: pending.root.clone(),
+                    query: parsed.query,
+                    glob: parsed.glob,
+                    glob_pattern: None,
+                    hidden: parsed.hidden,
+                    follow_symlinks: parsed.follow_symlinks,
+                    case_sensitive: false,
+                }
+            }
+            FindKind::ContentRg => {
+                let parsed = match parse_content_search_input(
+                    value.as_str(),
+                    pending.default_hidden,
+                    pending.default_case_sensitive,
+                ) {
+                    Ok(parsed) => parsed,
+                    Err(err) => {
+                        self.show_alert(format!("search parse error: {err}"));
+                        return true;
+                    }
+                };
+                if !is_rg_available() {
+                    self.show_alert(
+                        "rg is not installed. Install: brew install ripgrep or apt install ripgrep",
+                    );
+                    return true;
+                }
+                FindRequest {
+                    id: self.next_find_id,
+                    panel_id: pending.panel_id,
+                    kind: FindKind::ContentRg,
+                    root: pending.root.clone(),
+                    query: parsed.pattern,
+                    glob: false,
+                    glob_pattern: parsed.glob_pattern,
+                    hidden: parsed.hidden,
+                    follow_symlinks: false,
+                    case_sensitive: parsed.case_sensitive,
+                }
             }
         };
 
-        if !is_fd_available() {
-            self.show_alert("fd is not installed. Install: brew install fd or apt install fd-find");
-            return true;
-        }
-
-        let request = FindRequest {
-            id: self.next_find_id,
-            panel_id: pending.panel_id,
-            root: pending.root.clone(),
-            query: parsed.query.clone(),
-            glob: parsed.glob,
-            hidden: parsed.hidden,
-            follow_symlinks: parsed.follow_symlinks,
-        };
         self.next_find_id = self.next_find_id.saturating_add(1);
         self.set_active_find_id(pending.panel_id, Some(request.id));
         self.state.find_progress = Some(FindProgressState {
             panel_id: pending.panel_id,
+            kind: request.kind,
             query: request.query.clone(),
             matches: 0,
             running: true,
         });
         self.state.status_line = format!(
-            "find running: '{}'{}{}",
-            request.query,
-            if request.glob { " [glob]" } else { "" },
-            if request.follow_symlinks {
-                " [follow]"
-            } else {
-                ""
-            }
+            "{} running: '{}' (Esc to cancel)",
+            find_kind_title(request.kind),
+            request.query
         );
-        spawn_fd_search(request, self.event_tx.clone());
+        match request.kind {
+            FindKind::NameFd => spawn_fd_search(request, self.event_tx.clone()),
+            FindKind::ContentRg => spawn_rg_search(request, self.event_tx.clone()),
+        }
         true
     }
 
@@ -3241,6 +3372,9 @@ impl App {
             MenuAction::PanelFindFd(panel_id) => {
                 self.run_with_panel_focus(panel_id, Self::start_find_fd_prompt)
             }
+            MenuAction::PanelSearchRg(panel_id) => {
+                self.run_with_panel_focus(panel_id, Self::start_find_rg_prompt)
+            }
             MenuAction::PanelOpenArchiveVfs(panel_id) => {
                 self.state.active_panel = panel_id;
                 self.open_selected_archive_from_panel(panel_id)
@@ -3384,6 +3518,33 @@ impl App {
             }
             _ => Some(false),
         }
+    }
+
+    fn handle_find_cancel_input(&mut self, key: &KeyEvent) -> Option<bool> {
+        if !(key.code == KeyCode::Esc && key.modifiers.is_empty()) {
+            return None;
+        }
+        let progress = self.state.find_progress.as_ref()?;
+        if !progress.running {
+            return None;
+        }
+
+        let panel_id = progress.panel_id;
+        let find_kind = progress.kind;
+        let Some(find_id) = self.active_find_id(panel_id) else {
+            return None;
+        };
+
+        let _ = cancel_running_find(find_id);
+        self.set_active_find_id(panel_id, None);
+        self.state.find_progress = None;
+        self.state.status_line = format!("{} canceled", find_kind_title(find_kind));
+        self.push_log(format!(
+            "{} canceled [{}]",
+            find_kind_title(find_kind),
+            panel_name(panel_id)
+        ));
+        Some(true)
     }
 
     fn execute_command_line(&mut self, raw: &str) -> Result<bool> {
@@ -4236,6 +4397,50 @@ fn panel_name(panel_id: PanelId) -> &'static str {
     match panel_id {
         PanelId::Left => "left",
         PanelId::Right => "right",
+    }
+}
+
+fn find_kind_title(kind: FindKind) -> &'static str {
+    match kind {
+        FindKind::NameFd => "search files",
+        FindKind::ContentRg => "search text",
+    }
+}
+
+fn find_view_mode_suffix(view: &FindPanelState) -> String {
+    match view.kind {
+        FindKind::NameFd => {
+            let mut flags = Vec::new();
+            if view.glob {
+                flags.push("glob");
+            }
+            if view.hidden {
+                flags.push("hidden");
+            }
+            if view.follow_symlinks {
+                flags.push("follow");
+            }
+            if flags.is_empty() {
+                "fd".to_string()
+            } else {
+                format!("fd:{}", flags.join(","))
+            }
+        }
+        FindKind::ContentRg => {
+            let mut flags = Vec::new();
+            if let Some(glob) = view.glob_pattern.as_ref() {
+                flags.push(format!("glob={glob}"));
+            }
+            if view.hidden {
+                flags.push("hidden".to_string());
+            }
+            if view.case_sensitive {
+                flags.push("case".to_string());
+            } else {
+                flags.push("ignore-case".to_string());
+            }
+            format!("rg:{}", flags.join(","))
+        }
     }
 }
 

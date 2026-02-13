@@ -12,7 +12,8 @@ Built in Rust with `ratatui` + `crossterm`, focused on responsive UI and predict
 - MC-like multi-selection (`Space/Ins`, range, mask select/deselect, invert)
 - Interactive conflict matrix for copy/move (`overwrite/skip/rename/newer` + `*All`)
 - Top menu bar (`Left`, `Options`, `Right`) with keyboard navigation
-- Find files via external `fd` with panelized results
+- Search files via external `fd` with panelized results
+- Search text via external `rg` with panelized `file:line:snippet` results
 - Fullscreen viewer with `text/hex` modes, in-view search, and match navigation
 - External editor integration (`F4`) with:
   - `$EDITOR` priority
@@ -26,6 +27,7 @@ Built in Rust with `ratatui` + `crossterm`, focused on responsive UI and predict
 - Rust stable toolchain
 - Optional but recommended:
   - `fd` for Find workflow
+  - `rg` (`ripgrep`) for content-search workflow
   - available editors in `PATH` (`nvim`, `vim`, `nano`, `hx`, `micro`, `emacs`, `code`)
 
 ## Run
@@ -100,7 +102,8 @@ Per-panel actions:
 - Copy / Move / Delete / Mkdir
 - Connect SFTP (or disconnect if already connected)
 - Command Line / Shell
-- Find (`fd`)
+- Search files
+- Search text
 - Archive VFS
 
 ### Options
@@ -126,9 +129,9 @@ Per-panel actions:
 - Top `..` exits archive mode back to local filesystem
 - Supported v1 operations inside archive: browse + copy out (`archive -> local/sftp`)
 
-### Find (`fd`)
+### Search files (`fd`)
 
-- Start from `F9 -> Left/Right -> Find (fd)`
+- Start from `F9 -> Left/Right -> Search files`
 - Enter: `pattern [--glob] [--hidden] [--follow]`
 - Results appear in panelized virtual view
 - `Enter` on result:
@@ -136,6 +139,17 @@ Per-panel actions:
   - file: jump to parent and select file
 - Top `..` exits find results view
 - If `fd` is missing, VCMC shows install hint
+
+### Search text (`rg`, content)
+
+- Start from `F9 -> Left/Right -> Search text`
+- Enter: `pattern [--glob GLOB] [--hidden] [--case-sensitive|--ignore-case]`
+- Search runs asynchronously with live match counter in footer
+- Press `Esc` while running to cancel current search
+- Results appear in panelized virtual view as `file:line:snippet`
+- `Enter` on a result jumps to its file location in panel
+- Top `..` exits search results view
+- If `rg` is missing, VCMC shows install hint
 
 ### Viewer
 
@@ -187,6 +201,7 @@ Supported patterns:
 - Delete is permanent (no Trash)
 - Archive VFS is read-only in v1
 - Find via `fd` is local-only in v1
+- Content search via `rg` is local-only in v1
 - Viewer is preview-limited (`256 KB`) for all backends
 - Editor works only on local backend
 - No internal editor yet

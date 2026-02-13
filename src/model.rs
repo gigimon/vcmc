@@ -12,6 +12,12 @@ pub enum PanelId {
     Right,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FindKind {
+    NameFd,
+    ContentRg,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SftpAuth {
     Agent,
@@ -290,11 +296,14 @@ impl PanelState {
 
 #[derive(Debug, Clone)]
 pub struct FindPanelState {
+    pub kind: FindKind,
     pub root: PathBuf,
     pub query: String,
     pub glob: bool,
+    pub glob_pattern: Option<String>,
     pub hidden: bool,
     pub follow_symlinks: bool,
+    pub case_sensitive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -554,11 +563,14 @@ pub struct JobUpdate {
 pub struct FindRequest {
     pub id: u64,
     pub panel_id: PanelId,
+    pub kind: FindKind,
     pub root: PathBuf,
     pub query: String,
     pub glob: bool,
+    pub glob_pattern: Option<String>,
     pub hidden: bool,
     pub follow_symlinks: bool,
+    pub case_sensitive: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -566,22 +578,33 @@ pub enum FindUpdate {
     Progress {
         id: u64,
         panel_id: PanelId,
+        kind: FindKind,
         query: String,
         matches: usize,
     },
     Done {
         id: u64,
         panel_id: PanelId,
+        kind: FindKind,
         query: String,
         root: PathBuf,
         glob: bool,
+        glob_pattern: Option<String>,
         hidden: bool,
         follow_symlinks: bool,
+        case_sensitive: bool,
         entries: Vec<FsEntry>,
+    },
+    Canceled {
+        id: u64,
+        panel_id: PanelId,
+        kind: FindKind,
+        query: String,
     },
     Failed {
         id: u64,
         panel_id: PanelId,
+        kind: FindKind,
         query: String,
         error: String,
     },
@@ -617,6 +640,7 @@ pub struct BatchProgressState {
 #[derive(Debug, Clone)]
 pub struct FindProgressState {
     pub panel_id: PanelId,
+    pub kind: FindKind,
     pub query: String,
     pub matches: usize,
     pub running: bool,

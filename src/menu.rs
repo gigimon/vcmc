@@ -14,6 +14,7 @@ pub enum MenuAction {
     PanelOpenShell(PanelId),
     PanelOpenCommandLine(PanelId),
     PanelFindFd(PanelId),
+    PanelSearchRg(PanelId),
     ToggleSort,
     Refresh,
     ViewerModesInfo,
@@ -53,7 +54,7 @@ pub struct MenuGroupSpec {
     pub items: &'static [MenuItemSpec],
 }
 
-const LEFT_ITEMS: [MenuItemSpec; 14] = [
+const LEFT_ITEMS: [MenuItemSpec; 15] = [
     MenuItemSpec::action("Activate Left", MenuAction::ActivatePanel(PanelId::Left)),
     MenuItemSpec::action("Home", MenuAction::PanelHome(PanelId::Left)),
     MenuItemSpec::action("Parent", MenuAction::PanelParent(PanelId::Left)),
@@ -69,7 +70,8 @@ const LEFT_ITEMS: [MenuItemSpec; 14] = [
         MenuAction::PanelOpenCommandLine(PanelId::Left),
     ),
     MenuItemSpec::action("Shell", MenuAction::PanelOpenShell(PanelId::Left)),
-    MenuItemSpec::action("Find (fd)", MenuAction::PanelFindFd(PanelId::Left)),
+    MenuItemSpec::action("Search files", MenuAction::PanelFindFd(PanelId::Left)),
+    MenuItemSpec::action("Search text", MenuAction::PanelSearchRg(PanelId::Left)),
     MenuItemSpec::action(
         "Archive VFS",
         MenuAction::PanelOpenArchiveVfs(PanelId::Left),
@@ -83,7 +85,7 @@ const OPTIONS_ITEMS: [MenuItemSpec; 4] = [
     MenuItemSpec::action("Editor Settings", MenuAction::EditorSettings),
 ];
 
-const RIGHT_ITEMS: [MenuItemSpec; 14] = [
+const RIGHT_ITEMS: [MenuItemSpec; 15] = [
     MenuItemSpec::action("Activate Right", MenuAction::ActivatePanel(PanelId::Right)),
     MenuItemSpec::action("Home", MenuAction::PanelHome(PanelId::Right)),
     MenuItemSpec::action("Parent", MenuAction::PanelParent(PanelId::Right)),
@@ -99,7 +101,8 @@ const RIGHT_ITEMS: [MenuItemSpec; 14] = [
         MenuAction::PanelOpenCommandLine(PanelId::Right),
     ),
     MenuItemSpec::action("Shell", MenuAction::PanelOpenShell(PanelId::Right)),
-    MenuItemSpec::action("Find (fd)", MenuAction::PanelFindFd(PanelId::Right)),
+    MenuItemSpec::action("Search files", MenuAction::PanelFindFd(PanelId::Right)),
+    MenuItemSpec::action("Search text", MenuAction::PanelSearchRg(PanelId::Right)),
     MenuItemSpec::action(
         "Archive VFS",
         MenuAction::PanelOpenArchiveVfs(PanelId::Right),

@@ -8,8 +8,8 @@ use ratatui::widgets::{Block, Borders, Clear, Paragraph};
 use crate::menu::top_menu_groups;
 use crate::model::{
     AppState, BatchProgressState, CommandLineState, DialogButtonRole, DialogState, DialogTone,
-    FindProgressState, FsEntry, FsEntryType, JobKind, PanelId, PanelState, ScreenMode, SortMode,
-    ViewerMode, ViewerState,
+    FindKind, FindProgressState, FsEntry, FsEntryType, JobKind, PanelId, PanelState, ScreenMode,
+    SortMode, ViewerMode, ViewerState,
 };
 use crate::theme::{DirColorsTheme, ThemeColor, ThemeStyle};
 
@@ -1220,21 +1220,38 @@ fn find_suffix(panel: &PanelState) -> String {
     let Some(find) = panel.find_view.as_ref() else {
         return String::new();
     };
-
     let mut flags = Vec::new();
-    if find.glob {
-        flags.push("glob");
-    }
-    if find.hidden {
-        flags.push("hidden");
-    }
-    if find.follow_symlinks {
-        flags.push("follow");
-    }
-    if flags.is_empty() {
-        format!(" [fd:{}]", find.query)
-    } else {
-        format!(" [fd:{}:{}]", find.query, flags.join(","))
+    match find.kind {
+        FindKind::NameFd => {
+            if find.glob {
+                flags.push("glob".to_string());
+            }
+            if find.hidden {
+                flags.push("hidden".to_string());
+            }
+            if find.follow_symlinks {
+                flags.push("follow".to_string());
+            }
+            if flags.is_empty() {
+                format!(" [fd:{}]", find.query)
+            } else {
+                format!(" [fd:{}:{}]", find.query, flags.join(","))
+            }
+        }
+        FindKind::ContentRg => {
+            if let Some(glob) = find.glob_pattern.as_ref() {
+                flags.push(format!("glob={glob}"));
+            }
+            if find.hidden {
+                flags.push("hidden".to_string());
+            }
+            if find.case_sensitive {
+                flags.push("case".to_string());
+            } else {
+                flags.push("ignore-case".to_string());
+            }
+            format!(" [rg:{}:{}]", find.query, flags.join(","))
+        }
     }
 }
 
@@ -1243,11 +1260,18 @@ fn find_status_label(progress: &FindProgressState) -> String {
         PanelId::Left => "L",
         PanelId::Right => "R",
     };
+    let engine = match progress.kind {
+        FindKind::NameFd => "FD",
+        FindKind::ContentRg => "RG",
+    };
     if progress.running {
-        format!("FIND {panel} '{}' {}...", progress.query, progress.matches)
+        format!(
+            "{engine} {panel} '{}' {}...",
+            progress.query, progress.matches
+        )
     } else {
         format!(
-            "FIND {panel} '{}' {} done",
+            "{engine} {panel} '{}' {} done",
             progress.query, progress.matches
         )
     }
