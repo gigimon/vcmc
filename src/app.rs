@@ -49,6 +49,7 @@ pub struct App {
     pending_confirmation: Option<PendingConfirmation>,
     pending_rename: Option<PendingRename>,
     pending_mask: Option<PendingMask>,
+    pending_mkdir: Option<PendingMkdir>,
     pending_sftp_connect: Option<PendingSftpConnect>,
     pending_bookmark: Option<PendingBookmark>,
     pending_conflict: Option<PendingConflict>,
@@ -83,6 +84,11 @@ struct PendingRename {
 struct PendingMask {
     panel_id: PanelId,
     select: bool,
+}
+
+struct PendingMkdir {
+    panel_id: PanelId,
+    base_dir: PathBuf,
 }
 
 struct PendingSftpConnect {
@@ -265,6 +271,7 @@ impl App {
             pending_confirmation: None,
             pending_rename: None,
             pending_mask: None,
+            pending_mkdir: None,
             pending_sftp_connect: None,
             pending_bookmark: None,
             pending_conflict: None,
@@ -366,6 +373,7 @@ impl App {
                 self.pending_confirmation = None;
                 self.pending_rename = None;
                 self.pending_mask = None;
+                self.pending_mkdir = None;
                 self.pending_sftp_connect = None;
                 self.pending_bookmark = None;
                 self.pending_conflict = None;
@@ -1014,6 +1022,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -1105,6 +1114,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -1317,6 +1327,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -1344,6 +1355,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -1377,6 +1389,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -1416,6 +1429,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -1443,6 +1457,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -1479,6 +1494,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -1509,6 +1525,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -1545,6 +1562,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -1579,6 +1597,9 @@ impl App {
     fn toggle_select_current(&mut self) -> Result<bool> {
         let panel = self.active_panel_mut();
         let changed = panel.toggle_current_selection();
+        if changed {
+            panel.move_selection_down();
+        }
         panel.clear_selection_anchor();
         self.update_selection_status();
         Ok(changed)
@@ -1812,14 +1833,41 @@ impl App {
             self.show_alert("mkdir inside archive VFS is not supported (read-only)");
             return Ok(true);
         }
-        let target = self.find_available_directory_name(self.active_panel().cwd.clone(), "new_dir");
-        self.enqueue_job(JobKind::Mkdir, target, None, "mkdir queued")
+
+        let panel_id = self.state.active_panel;
+        let base_dir = self.panel(panel_id).cwd.clone();
+        let default_target = self.find_available_directory_name(base_dir.clone(), "new_dir");
+        let default_name = default_target
+            .file_name()
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| "new_dir".to_string());
+
+        self.input_mode = None;
+        self.pending_confirmation = None;
+        self.pending_rename = None;
+        self.pending_mask = None;
+        self.pending_mkdir = Some(PendingMkdir { panel_id, base_dir });
+        self.pending_sftp_connect = None;
+        self.pending_bookmark = None;
+        self.pending_conflict = None;
+        self.pending_find = None;
+        self.pending_editor_choice = None;
+        self.pending_viewer_search = false;
+        self.state.dialog = Some(input_dialog(
+            "Create directory",
+            "Enter directory name",
+            default_name,
+            DialogTone::Default,
+        ));
+        self.state.status_line = "mkdir: enter directory name".to_string();
+        Ok(true)
     }
 
     fn open_rename_prompt(&mut self, kind: JobKind, entry: &FsEntry) -> Result<bool> {
         self.input_mode = None;
         self.pending_confirmation = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
@@ -2720,6 +2768,17 @@ impl App {
             };
         }
 
+        if self.pending_mkdir.is_some() {
+            return if role == DialogButtonRole::Primary {
+                self.apply_mkdir()
+            } else {
+                self.pending_mkdir = None;
+                self.state.dialog = None;
+                self.push_log("mkdir canceled");
+                true
+            };
+        }
+
         if self.pending_sftp_connect.is_some() {
             return if role == DialogButtonRole::Primary {
                 self.apply_sftp_connect()
@@ -2806,6 +2865,13 @@ impl App {
             self.pending_mask = None;
             self.state.dialog = None;
             self.push_log("mask selection canceled");
+            return true;
+        }
+
+        if self.pending_mkdir.is_some() {
+            self.pending_mkdir = None;
+            self.state.dialog = None;
+            self.push_log("mkdir canceled");
             return true;
         }
 
@@ -2959,6 +3025,50 @@ impl App {
             format!("deselected {changed} by mask")
         });
         true
+    }
+
+    fn apply_mkdir(&mut self) -> bool {
+        let pending = self.pending_mkdir.take();
+        let requested_name = self
+            .state
+            .dialog
+            .as_ref()
+            .and_then(|dialog| dialog.input_value.as_ref())
+            .map(|value| value.trim().to_string())
+            .unwrap_or_default();
+        self.state.dialog = None;
+
+        let Some(pending) = pending else {
+            return true;
+        };
+
+        if requested_name.is_empty() {
+            self.show_alert("directory name cannot be empty");
+            return true;
+        }
+        if requested_name.contains('/') {
+            self.show_alert("directory name cannot contain '/'");
+            return true;
+        }
+        if requested_name == "." || requested_name == ".." {
+            self.show_alert("directory name cannot be '.' or '..'");
+            return true;
+        }
+
+        self.state.active_panel = pending.panel_id;
+        let target = pending.base_dir.join(&requested_name);
+        match self.enqueue_job(
+            JobKind::Mkdir,
+            target,
+            None,
+            format!("mkdir queued: {requested_name}"),
+        ) {
+            Ok(redraw) => redraw,
+            Err(err) => {
+                self.show_alert(err.to_string());
+                true
+            }
+        }
     }
 
     fn apply_sftp_connect(&mut self) -> bool {
@@ -3610,6 +3720,7 @@ impl App {
     fn edit_dialog_input_backspace(&mut self) -> bool {
         if self.pending_rename.is_none()
             && self.pending_mask.is_none()
+            && self.pending_mkdir.is_none()
             && self.pending_sftp_connect.is_none()
             && self.pending_bookmark.is_none()
             && self.pending_find.is_none()
@@ -3630,6 +3741,7 @@ impl App {
     fn edit_dialog_input_char(&mut self, c: char) -> bool {
         if self.pending_rename.is_none()
             && self.pending_mask.is_none()
+            && self.pending_mkdir.is_none()
             && self.pending_sftp_connect.is_none()
             && self.pending_bookmark.is_none()
             && self.pending_find.is_none()
@@ -4270,6 +4382,7 @@ impl App {
         self.pending_confirmation = None;
         self.pending_rename = None;
         self.pending_mask = None;
+        self.pending_mkdir = None;
         self.pending_sftp_connect = None;
         self.pending_bookmark = None;
         self.pending_conflict = None;
